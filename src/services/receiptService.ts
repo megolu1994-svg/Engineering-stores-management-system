@@ -814,30 +814,156 @@ export async function getReceiptById(
 
 export interface ReceiptSummary {
   pendingInspection: number;
+  inspectionOnHold: number;
+  inspectionCleared: number;
   pendingGrn: number;
   closed: number;
   total: number;
 }
 
+export type DrcStatusKey = "pending" | "on_hold" | "cleared" | "closed";
+
+export interface DrcDisplayStatusInfo {
+  key: DrcStatusKey;
+  label: string;
+  badgeColor: "warning" | "error" | "success" | "default";
+  chipBg: string;
+  chipColor: string;
+  chipBorder: string;
+  remarks: string | null;
+  inspectedBy: string | null;
+  inspectionDate: string | null;
+}
+
 /**
- * Counts DRCs by status for the four summary cards on the Receipt
- * Register.
+ * Resolves the 3-state inspection and lifecycle status of a DRC:
+ * 1. Pending Inspection (freshly created DRC awaiting inspection)
+ * 2. Inspection on hold (with department hold comments/remarks)
+ * 3. Inspection cleared (cleared by department with comments/remarks)
+ * (and Closed once GRN is fully posted)
+ */
+export function getDrcDisplayStatus(receipt: {
+  status: ReceiptStatus;
+  inspection_status?: InspectionStatus | null;
+  inspection_remarks?: string | null;
+  inspection_by?: string | null;
+  inspection_date?: string | null;
+}): DrcDisplayStatusInfo {
+  // Closed DRC (GRN completed)
+  if (receipt.status === "Closed") {
+    return {
+      key: "closed",
+      label: "Closed",
+      badgeColor: "default",
+      chipBg: "#f1f5f9",
+      chipColor: "#475569",
+      chipBorder: "#cbd5e1",
+      remarks: receipt.inspection_remarks || null,
+      inspectedBy: receipt.inspection_by || null,
+      inspectionDate: receipt.inspection_date || null,
+    };
+  }
+
+  // 2. Inspection on hold (with department remarks)
+  if (receipt.inspection_status === "Inspection On Hold") {
+    return {
+      key: "on_hold",
+      label: "Inspection on hold",
+      badgeColor: "error",
+      chipBg: "#fef2f2",
+      chipColor: "#dc2626",
+      chipBorder: "#fecaca",
+      remarks: receipt.inspection_remarks || null,
+      inspectedBy: receipt.inspection_by || null,
+      inspectionDate: receipt.inspection_date || null,
+    };
+  }
+
+  // 3. Inspection cleared (with department remarks)
+  if (
+    receipt.inspection_status === "Inspection Cleared" ||
+    receipt.status === "Pending GRN"
+  ) {
+    return {
+      key: "cleared",
+      label: "Inspection cleared",
+      badgeColor: "success",
+      chipBg: "#f0fdf4",
+      chipColor: "#16a34a",
+      chipBorder: "#bbf7d0",
+      remarks: receipt.inspection_remarks || null,
+      inspectedBy: receipt.inspection_by || null,
+      inspectionDate: receipt.inspection_date || null,
+    };
+  }
+
+  // 1. Pending Inspection (just after creation of DRC)
+  return {
+    key: "pending",
+    label: "Pending Inspection",
+    badgeColor: "warning",
+    chipBg: "#fffbeb",
+    chipColor: "#d97706",
+    chipBorder: "#fde68a",
+    remarks: null,
+    inspectedBy: null,
+    inspectionDate: null,
+  };
+}
+
+/**
+ * Counts DRCs by status for the summary cards on the Receipt Register.
  */
 export async function getReceiptSummary(): Promise<ReceiptSummary> {
-  const { data, error } = await supabase.from("receipt_header").select("status");
+  const { data, error } = await supabase
+    .from("receipt_header")
+    .select("status, inspection_status");
 
   if (error) {
     console.error(error);
-    return { pendingInspection: 0, pendingGrn: 0, closed: 0, total: 0 };
+    return {
+      pendingInspection: 0,
+      inspectionOnHold: 0,
+      inspectionCleared: 0,
+      pendingGrn: 0,
+      closed: 0,
+      total: 0,
+    };
   }
 
-  const rows = (data ?? []) as { status: ReceiptStatus }[];
+  const rows = (data ?? []) as {
+    status: ReceiptStatus;
+    inspection_status: InspectionStatus | null;
+  }[];
+
+  let pendingInspection = 0;
+  let inspectionOnHold = 0;
+  let inspectionCleared = 0;
+  let pendingGrn = 0;
+  let closed = 0;
+
+  for (const r of rows) {
+    if (r.status === "Closed") {
+      closed += 1;
+    } else if (r.inspection_status === "Inspection On Hold") {
+      inspectionOnHold += 1;
+    } else if (
+      r.inspection_status === "Inspection Cleared" ||
+      r.status === "Pending GRN"
+    ) {
+      inspectionCleared += 1;
+      if (r.status === "Pending GRN") pendingGrn += 1;
+    } else {
+      pendingInspection += 1;
+    }
+  }
 
   return {
-    pendingInspection: rows.filter((r) => r.status === "Pending Inspection")
-      .length,
-    pendingGrn: rows.filter((r) => r.status === "Pending GRN").length,
-    closed: rows.filter((r) => r.status === "Closed").length,
+    pendingInspection,
+    inspectionOnHold,
+    inspectionCleared,
+    pendingGrn,
+    closed,
     total: rows.length,
   };
 }

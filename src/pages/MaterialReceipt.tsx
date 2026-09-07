@@ -35,6 +35,7 @@ import {
   TableHead,
   TableRow,
   TextField,
+  Tooltip,
   Typography,
   useMediaQuery,
 } from "@mui/material";
@@ -47,7 +48,6 @@ import EditIcon from "@mui/icons-material/Edit";
 import PrintIcon from "@mui/icons-material/Print";
 import CloseIcon from "@mui/icons-material/Close";
 import PendingActionsIcon from "@mui/icons-material/PendingActions";
-import AssignmentTurnedInIcon from "@mui/icons-material/AssignmentTurnedIn";
 import TaskAltIcon from "@mui/icons-material/TaskAlt";
 import Inventory2Icon from "@mui/icons-material/Inventory2";
 import AddPhotoAlternateIcon from "@mui/icons-material/AddPhotoAlternate";
@@ -65,6 +65,7 @@ import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import TaskAltOutlinedIcon from "@mui/icons-material/TaskAltOutlined";
 import ReportProblemIcon from "@mui/icons-material/ReportProblem";
+import CommentIcon from "@mui/icons-material/Comment";
 import BusinessIcon from "@mui/icons-material/Business";
 import LocalShippingIcon from "@mui/icons-material/LocalShipping";
 import LocalOfferIcon from "@mui/icons-material/LocalOffer";
@@ -82,6 +83,7 @@ import {
   getReceiptSummary,
   uploadReceiptPhotos,
   getNextDrcNumberSuggestion,
+  getDrcDisplayStatus,
   // Sprint 2
   submitInspection,
   getInspectionHistory,
@@ -178,13 +180,107 @@ function formatDateTime(value: string): string {
   });
 }
 
-function statusColor(
-  status: string
-): "warning" | "info" | "success" | "default" {
-  if (status === "Pending Inspection") return "warning";
-  if (status === "Pending GRN") return "info";
-  if (status === "Closed") return "success";
-  return "default";
+/**
+ * Renders the 3 distinct DRC inspection / lifecycle status chips:
+ * 1. Pending Inspection (Amber #d97706) - Created, awaiting inspection
+ * 2. Inspection on hold (Red #dc2626) - Held by department, with comments/remarks
+ * 3. Inspection cleared (Green #16a34a) - Cleared by department, with comments/remarks
+ * (plus Closed for completed GRN)
+ */
+function DrcStatusChip({
+  receipt,
+  showRemarks = true,
+}: {
+  receipt: ReceiptHeader;
+  showRemarks?: boolean;
+}) {
+  const statusInfo = getDrcDisplayStatus(receipt);
+
+  let iconNode = <PendingActionsIcon sx={{ fontSize: "14px !important" }} />;
+  if (statusInfo.key === "on_hold") {
+    iconNode = <ReportProblemIcon sx={{ fontSize: "14px !important" }} />;
+  } else if (statusInfo.key === "cleared") {
+    iconNode = <TaskAltOutlinedIcon sx={{ fontSize: "14px !important" }} />;
+  } else if (statusInfo.key === "closed") {
+    iconNode = <TaskAltIcon sx={{ fontSize: "14px !important" }} />;
+  }
+
+  return (
+    <Box
+      sx={{
+        display: "inline-flex",
+        flexDirection: "column",
+        gap: 0.5,
+        alignItems: "flex-start",
+      }}
+    >
+      <Chip
+        size="small"
+        label={statusInfo.label}
+        icon={iconNode}
+        sx={{
+          fontWeight: 700,
+          fontSize: "0.75rem",
+          bgcolor: statusInfo.chipBg,
+          color: statusInfo.chipColor,
+          border: `1px solid ${statusInfo.chipBorder}`,
+          "& .MuiChip-icon": { color: "inherit", ml: 0.5 },
+        }}
+      />
+      {showRemarks && statusInfo.remarks && (
+        <Tooltip
+          title={
+            <Box sx={{ p: 0.5, maxWidth: 320 }}>
+              <Typography
+                variant="caption"
+                sx={{ fontWeight: 700, display: "block", color: "common.white" }}
+              >
+                Department Comments
+                {statusInfo.inspectedBy ? ` (${statusInfo.inspectedBy})` : ""}:
+              </Typography>
+              <Typography
+                variant="caption"
+                sx={{ color: "grey.200", whiteSpace: "pre-wrap" }}
+              >
+                {statusInfo.remarks}
+              </Typography>
+            </Box>
+          }
+          arrow
+          placement="top"
+        >
+          <Box
+            sx={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 0.5,
+              color: statusInfo.key === "on_hold" ? "#b91c1c" : "text.secondary",
+              fontWeight: statusInfo.key === "on_hold" ? 700 : 500,
+              fontSize: "0.72rem",
+              maxWidth: { xs: 180, md: 220 },
+              bgcolor: statusInfo.key === "on_hold" ? "#fee2e2" : "#f1f5f9",
+              px: 0.75,
+              py: 0.25,
+              borderRadius: 1,
+              border: "1px dashed",
+              borderColor: statusInfo.key === "on_hold" ? "#fca5a5" : "#cbd5e1",
+              cursor: "pointer",
+            }}
+          >
+            <CommentIcon sx={{ fontSize: 13, flexShrink: 0 }} />
+            <Typography
+              variant="caption"
+              component="span"
+              noWrap
+              sx={{ fontSize: "inherit", fontWeight: "inherit", color: "inherit" }}
+            >
+              {statusInfo.remarks}
+            </Typography>
+          </Box>
+        </Tooltip>
+      )}
+    </Box>
+  );
 }
 
 // ---------------------------------------------------------------------
@@ -338,6 +434,8 @@ export default function MaterialReceipt() {
   // ---------------- Register + summary ----------------
   const [summary, setSummary] = useState<ReceiptSummary>({
     pendingInspection: 0,
+    inspectionOnHold: 0,
+    inspectionCleared: 0,
     pendingGrn: 0,
     closed: 0,
     total: 0,
@@ -347,8 +445,19 @@ export default function MaterialReceipt() {
   const [loading, setLoading] = useState(false);
 
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "pending" | "on_hold" | "cleared" | "closed"
+  >("all");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+
+  const filteredReceipts = useMemo(() => {
+    if (statusFilter === "all") return receipts;
+    return receipts.filter((r) => {
+      const info = getDrcDisplayStatus(r);
+      return info.key === statusFilter;
+    });
+  }, [receipts, statusFilter]);
 
   const loadReceipts = useCallback(async () => {
     setLoading(true);
@@ -1018,9 +1127,13 @@ export default function MaterialReceipt() {
       return;
     }
 
-    setInspectionStatusInput("Inspection Cleared");
-    setInspectionRemarksInput("");
-    setInspectionByInput("");
+    setInspectionStatusInput(
+      viewReceipt.inspection_status === "Inspection On Hold"
+        ? "Inspection On Hold"
+        : "Inspection Cleared"
+    );
+    setInspectionRemarksInput(viewReceipt.inspection_remarks || "");
+    setInspectionByInput(viewReceipt.inspection_by || "");
     resetGrnForm();
 
     let cancelled = false;
@@ -1254,6 +1367,8 @@ export default function MaterialReceipt() {
     const printWindow = window.open("", "_blank", "width=700,height=900");
     if (!printWindow) return;
 
+    const statusInfo = getDrcDisplayStatus(receipt);
+
     const packageSummary =
       receipt.package_details && receipt.package_details.length > 0
         ? receipt.package_details
@@ -1265,7 +1380,10 @@ export default function MaterialReceipt() {
 
     const rows: [string, string][] = [
       ["DRC Number", receipt.drc_number],
-      ["Status", receipt.status],
+      ["Status", statusInfo.label],
+      ["Inspection Remarks", receipt.inspection_remarks ?? "-"],
+      ["Inspected By", receipt.inspection_by ?? "-"],
+      ["Inspection Date", receipt.inspection_date ? formatDateTime(receipt.inspection_date) : "-"],
       ["Receipt Date/Time", formatDateTime(receipt.receipt_datetime)],
       ["Receipt Mode", receipt.receipt_mode],
       ["Vehicle Number", receipt.vehicle_number ?? "-"],
@@ -1324,28 +1442,54 @@ export default function MaterialReceipt() {
   // ---------------- Summary cards ----------------
   const summaryCards = [
     {
+      key: "pending" as const,
       label: "Pending Inspection",
       value: summary.pendingInspection,
       icon: <PendingActionsIcon />,
-      color: "warning.main",
+      color: "#d97706",
+      bg: "#fffbeb",
+      border: "#fde68a",
+      description: "Awaiting physical check",
     },
     {
-      label: "Pending GRN",
-      value: summary.pendingGrn,
-      icon: <AssignmentTurnedInIcon />,
-      color: "info.main",
+      key: "on_hold" as const,
+      label: "Inspection on hold",
+      value: summary.inspectionOnHold,
+      icon: <ReportProblemIcon />,
+      color: "#dc2626",
+      bg: "#fef2f2",
+      border: "#fecaca",
+      description: "Held with comments",
     },
     {
+      key: "cleared" as const,
+      label: "Inspection cleared",
+      value: summary.inspectionCleared,
+      icon: <TaskAltOutlinedIcon />,
+      color: "#16a34a",
+      bg: "#f0fdf4",
+      border: "#bbf7d0",
+      description: "Cleared by user dept",
+    },
+    {
+      key: "closed" as const,
       label: "Closed",
       value: summary.closed,
       icon: <TaskAltIcon />,
-      color: "success.main",
+      color: "#475569",
+      bg: "#f1f5f9",
+      border: "#cbd5e1",
+      description: "GRN completed",
     },
     {
+      key: "all" as const,
       label: "Total DRC",
       value: summary.total,
       icon: <Inventory2Icon />,
-      color: "primary.main",
+      color: "#2563eb",
+      bg: "#eff6ff",
+      border: "#bfdbfe",
+      description: "All records",
     },
   ];
 
@@ -1386,56 +1530,88 @@ export default function MaterialReceipt() {
       </Box>
 
       {/* ---- Summary cards ---- */}
-      <Grid container spacing={{ xs: 1.25, md: 2 }} sx={{ mb: 2 }}>
-        {summaryCards.map((card) => (
-          <Grid key={card.label} size={{ xs: 6, sm: 3 }}>
-            <Paper
-              elevation={0}
-              sx={{
-                p: { xs: 1.25, md: 2 },
-                borderRadius: 2.5,
-                boxShadow: "0 2px 10px rgba(15, 23, 42, 0.06)",
-                display: "flex",
-                alignItems: "center",
-                gap: { xs: 1, md: 1.5 },
-              }}
-            >
-              <Avatar
+      <Grid container spacing={{ xs: 1.25, md: 1.5 }} sx={{ mb: 2 }}>
+        {summaryCards.map((card) => {
+          const isSelected =
+            statusFilter === card.key ||
+            (statusFilter === "all" && card.key === "all");
+          return (
+            <Grid key={card.label} size={{ xs: 6, sm: 4, md: 2.4 }}>
+              <Paper
+                elevation={0}
+                onClick={() =>
+                  setStatusFilter((prev) =>
+                    prev === card.key ? "all" : card.key
+                  )
+                }
                 sx={{
-                  bgcolor: card.color,
-                  width: { xs: 36, md: 48 },
-                  height: { xs: 36, md: 48 },
-                  "& svg": { fontSize: { xs: 20, md: 24 } },
+                  p: { xs: 1.25, md: 1.5 },
+                  borderRadius: 2.5,
+                  boxShadow: isSelected
+                    ? `0 0 0 2px ${card.color}, 0 4px 12px rgba(15, 23, 42, 0.08)`
+                    : "0 2px 10px rgba(15, 23, 42, 0.06)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: { xs: 1, md: 1.25 },
+                  cursor: "pointer",
+                  transition: "all 0.15s ease-in-out",
+                  border: isSelected
+                    ? `1px solid ${card.color}`
+                    : "1px solid rgba(0,0,0,0.06)",
+                  bgcolor: isSelected ? card.bg : "background.paper",
+                  "&:hover": {
+                    transform: "translateY(-1px)",
+                    boxShadow: "0 4px 14px rgba(15, 23, 42, 0.1)",
+                  },
                 }}
               >
-                {card.icon}
-              </Avatar>
-              <Box sx={{ minWidth: 0 }}>
-                <Typography
-                  variant="h6"
-                  sx={{ fontWeight: 800, lineHeight: 1.1, fontSize: { xs: "1.25rem", md: "1.5rem" } }}
+                <Avatar
+                  sx={{
+                    bgcolor: card.color,
+                    color: "#fff",
+                    width: { xs: 36, md: 44 },
+                    height: { xs: 36, md: 44 },
+                    "& svg": { fontSize: { xs: 20, md: 22 } },
+                  }}
                 >
-                  {card.value}
-                </Typography>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ fontSize: { xs: "0.68rem", md: "0.8rem" } }}
-                  noWrap
-                >
-                  {card.label}
-                </Typography>
-              </Box>
-            </Paper>
-          </Grid>
-        ))}
+                  {card.icon}
+                </Avatar>
+                <Box sx={{ minWidth: 0 }}>
+                  <Typography
+                    variant="h6"
+                    sx={{
+                      fontWeight: 800,
+                      lineHeight: 1.1,
+                      fontSize: { xs: "1.2rem", md: "1.4rem" },
+                      color: isSelected ? card.color : "text.primary",
+                    }}
+                  >
+                    {card.value}
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{
+                      fontSize: { xs: "0.68rem", md: "0.78rem" },
+                      fontWeight: isSelected ? 700 : 500,
+                      display: "block",
+                    }}
+                    noWrap
+                  >
+                    {card.label}
+                  </Typography>
+                </Box>
+              </Paper>
+            </Grid>
+          );
+        })}
       </Grid>
 
       {/* ---- Search & filter ---- */}
       <Paper
         elevation={0}
         sx={{
-          p: 1.25,
+          p: 1.5,
           mb: 2,
           borderRadius: 2.5,
           boxShadow: "0 2px 10px rgba(15, 23, 42, 0.06)",
@@ -1444,7 +1620,7 @@ export default function MaterialReceipt() {
           zIndex: 4,
         }}
       >
-        <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
+        <Box sx={{ display: "flex", flexDirection: "column", gap: 1.25 }}>
           <TextField
             size="small"
             placeholder="Search DRC No, Vendor, PO No, Invoice No or Vehicle No"
@@ -1485,6 +1661,60 @@ export default function MaterialReceipt() {
               sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }}
             />
           </Box>
+
+          {/* Quick status filter pills */}
+          <Box sx={{ display: "flex", alignItems: "center", gap: 0.75, flexWrap: "wrap", pt: 0.25 }}>
+            <Typography variant="caption" sx={{ fontWeight: 700, color: "text.secondary", mr: 0.25 }}>
+              Status Filter:
+            </Typography>
+            {[
+              { key: "all", label: `All (${summary.total})`, color: "default" },
+              {
+                key: "pending",
+                label: `Pending Inspection (${summary.pendingInspection})`,
+                color: "warning",
+              },
+              {
+                key: "on_hold",
+                label: `Inspection on hold (${summary.inspectionOnHold})`,
+                color: "error",
+              },
+              {
+                key: "cleared",
+                label: `Inspection cleared (${summary.inspectionCleared})`,
+                color: "success",
+              },
+              {
+                key: "closed",
+                label: `Closed (${summary.closed})`,
+                color: "default",
+              },
+            ].map((pill) => (
+              <Chip
+                key={pill.key}
+                size="small"
+                label={pill.label}
+                clickable
+                onClick={() => setStatusFilter(pill.key as typeof statusFilter)}
+                color={statusFilter === pill.key ? (pill.color as any) : "default"}
+                variant={statusFilter === pill.key ? "filled" : "outlined"}
+                sx={{
+                  fontWeight: statusFilter === pill.key ? 700 : 500,
+                  fontSize: "0.75rem",
+                  cursor: "pointer",
+                }}
+              />
+            ))}
+            {statusFilter !== "all" && (
+              <Button
+                size="small"
+                onClick={() => setStatusFilter("all")}
+                sx={{ fontSize: "0.72rem", py: 0, minHeight: 24, textTransform: "none" }}
+              >
+                Reset Filter
+              </Button>
+            )}
+          </Box>
         </Box>
       </Paper>
 
@@ -1499,11 +1729,20 @@ export default function MaterialReceipt() {
             No DRCs found. Tap "Create DRC" to add the first one.
           </Typography>
         </Card>
+      ) : filteredReceipts.length === 0 ? (
+        <Card variant="outlined" sx={{ p: 3, textAlign: "center", borderRadius: 2.5 }}>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            No DRCs match the selected filter ({statusFilter.replace("_", " ")}).
+          </Typography>
+          <Button size="small" variant="outlined" onClick={() => setStatusFilter("all")}>
+            Show All DRCs
+          </Button>
+        </Card>
       ) : (
         <>
-          {/* ---- Mobile/tablet: card list (unchanged) ---- */}
+          {/* ---- Mobile/tablet: card list ---- */}
           <Box sx={{ display: { xs: "flex", md: "none" }, flexDirection: "column", gap: 1 }}>
-            {receipts.map((r) => (
+            {filteredReceipts.map((r) => (
               <Card
                 key={r.id}
                 variant="outlined"
@@ -1517,7 +1756,7 @@ export default function MaterialReceipt() {
                   "&:hover": { bgcolor: "action.hover" },
                 }}
               >
-                <Box sx={{ display: "flex", justifyContent: "space-between", gap: 1 }}>
+                <Box sx={{ display: "flex", justifyContent: "space-between", gap: 1, alignItems: "flex-start" }}>
                   <Box sx={{ minWidth: 0 }}>
                     <Typography sx={{ fontWeight: 700, fontSize: "0.9rem" }} noWrap>
                       {r.drc_number}
@@ -1526,12 +1765,7 @@ export default function MaterialReceipt() {
                       {r.vendor_name}
                     </Typography>
                   </Box>
-                  <Chip
-                    size="small"
-                    label={r.status}
-                    color={statusColor(r.status)}
-                    sx={{ fontWeight: 700, fontSize: "0.65rem" }}
-                  />
+                  <DrcStatusChip receipt={r} />
                 </Box>
 
                 <Grid container spacing={0.5} sx={{ mt: 0.5 }}>
@@ -1595,12 +1829,12 @@ export default function MaterialReceipt() {
                   <TableCell>Invoice Number</TableCell>
                   <TableCell>Vehicle Number</TableCell>
                   <TableCell>Receipt Date</TableCell>
-                  <TableCell>Status</TableCell>
+                  <TableCell>Status & Remarks</TableCell>
                   <TableCell align="right">Actions</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
-                {receipts.map((r) => (
+                {filteredReceipts.map((r) => (
                   <TableRow
                     key={r.id}
                     hover
@@ -1620,7 +1854,7 @@ export default function MaterialReceipt() {
                     <TableCell>{r.vehicle_number ?? "-"}</TableCell>
                     <TableCell>{formatDate(r.receipt_datetime)}</TableCell>
                     <TableCell>
-                      <Chip size="small" label={r.status} color={statusColor(r.status)} sx={{ fontWeight: 700 }} />
+                      <DrcStatusChip receipt={r} />
                     </TableCell>
                     <TableCell align="right" onClick={(e) => e.stopPropagation()}>
                       <Box sx={{ display: "flex", justifyContent: "flex-end" }}>
@@ -2042,22 +2276,37 @@ export default function MaterialReceipt() {
             </DialogTitle>
 
             <DialogContent dividers sx={{ p: 1.5 }}>
-              <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mb: 1.5 }}>
-                <Chip
-                  size="small"
-                  label={viewReceipt.status}
-                  color={statusColor(viewReceipt.status)}
-                  sx={{ fontWeight: 700 }}
-                />
-                {viewReceipt.inspection_status && (
+              <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mb: 1.5, alignItems: "center" }}>
+                <DrcStatusChip receipt={viewReceipt} showRemarks={false} />
+                {viewReceipt.inspection_by && (
                   <Chip
                     size="small"
                     variant="outlined"
-                    label={`Inspection: ${viewReceipt.inspection_status}`}
+                    label={`Inspector: ${viewReceipt.inspection_by}`}
                     sx={{ fontWeight: 600 }}
                   />
                 )}
+                {viewReceipt.inspection_date && (
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={formatDate(viewReceipt.inspection_date)}
+                    sx={{ fontWeight: 500 }}
+                  />
+                )}
               </Box>
+
+              {viewReceipt.inspection_remarks && (
+                <Alert
+                  severity={viewReceipt.inspection_status === "Inspection On Hold" ? "error" : "success"}
+                  sx={{ mb: 1.5, borderRadius: 2 }}
+                >
+                  <Typography variant="caption" sx={{ fontWeight: 700, display: "block" }}>
+                    Department Inspection Comments ({viewReceipt.inspection_status}):
+                  </Typography>
+                  <Typography variant="body2">{viewReceipt.inspection_remarks}</Typography>
+                </Alert>
+              )}
 
               <Box sx={{ display: "flex", flexDirection: "column", gap: 0.75 }}>
                 {[
@@ -2311,7 +2560,7 @@ export default function MaterialReceipt() {
                           ? "contained"
                           : "outlined"
                       }
-                      color="warning"
+                      color="error"
                       fullWidth
                       startIcon={<ReportProblemIcon fontSize="small" />}
                       onClick={() => setInspectionStatusInput("Inspection On Hold")}
