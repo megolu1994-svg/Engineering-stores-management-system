@@ -16,11 +16,12 @@ import {
 } from "@mui/material";
 
 import { useAuth } from "../contexts/AuthContext";
+import { isSupabaseConfigured } from "../config/supabase";
 
 type Mode = "signin" | "signup";
 
 export default function Login() {
-  const { session, loading, signIn, signUp } = useAuth();
+  const { session, loading, signIn, signUp, signInDemo } = useAuth();
 
   const [mode, setMode] = useState<Mode>("signin");
   const [email, setEmail] = useState("");
@@ -166,6 +167,26 @@ export default function Login() {
                 "Sign In"
               )}
             </Button>
+
+            <Button
+              variant="outlined"
+              fullWidth
+              size="medium"
+              onClick={() => signInDemo()}
+              sx={{ mt: 1.5, minHeight: 44, fontWeight: 600 }}
+            >
+              Explore in Demo Mode
+            </Button>
+
+            {!isSupabaseConfigured && (
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: "block", textAlign: "center", mt: 1.5 }}
+              >
+                Database not yet connected. Click "Explore in Demo Mode" to preview screens, or configure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in settings.
+              </Typography>
+            )}
           </Box>
         </CardContent>
       </Card>

@@ -691,7 +691,7 @@ export async function bulkImportMaterials(
     const batch = rows.slice(i, i + batchSize);
     const codes = batch.map((row) => row.material_code);
 
-    let existingSet = new Set<string>();
+    let existingSet: Set<string>;
 
     try {
       const { data: existing, error: fetchError } = await supabase

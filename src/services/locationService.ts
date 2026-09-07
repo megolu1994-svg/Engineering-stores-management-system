@@ -416,7 +416,7 @@ export async function bulkImportLocations(
     const batch = rows.slice(i, i + batchSize);
     const codes = batch.map((row) => row.location_code);
 
-    let existingSet = new Set<string>();
+    let existingSet: Set<string>;
 
     try {
       const { data: existing, error: fetchError } = await supabase

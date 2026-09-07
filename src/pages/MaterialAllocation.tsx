@@ -338,7 +338,7 @@ export default function MaterialAllocation() {
       await loadAllocations(material.material_code);
 
       scrollToAllocations();
-    } catch (err) {
+    } catch {
       showSnackbar("Something went wrong while saving the allocation.", "error");
     } finally {
       setSavingAllocation(false);
@@ -400,7 +400,7 @@ export default function MaterialAllocation() {
       closeEditDialog();
 
       await loadAllocations(material.material_code);
-    } catch (err) {
+    } catch {
       showSnackbar("Something went wrong while updating the allocation.", "error");
     } finally {
       setSavingAllocation(false);
@@ -437,7 +437,7 @@ export default function MaterialAllocation() {
       closeDeleteDialog();
 
       await loadAllocations(material.material_code);
-    } catch (err) {
+    } catch {
       showSnackbar("Something went wrong while deleting the allocation.", "error");
     } finally {
       setSavingAllocation(false);

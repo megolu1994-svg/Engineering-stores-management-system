@@ -1498,7 +1498,19 @@ export default function MaterialReceipt() {
           {/* ---- Mobile/tablet: card list (unchanged) ---- */}
           <Box sx={{ display: { xs: "flex", md: "none" }, flexDirection: "column", gap: 1 }}>
             {receipts.map((r) => (
-              <Card key={r.id} variant="outlined" sx={{ borderRadius: 2.5, px: 1.5, py: 1.25 }}>
+              <Card
+                key={r.id}
+                variant="outlined"
+                onClick={() => setViewReceipt(r)}
+                sx={{
+                  borderRadius: 2.5,
+                  px: 1.5,
+                  py: 1.25,
+                  cursor: "pointer",
+                  transition: "background-color 0.15s ease",
+                  "&:hover": { bgcolor: "action.hover" },
+                }}
+              >
                 <Box sx={{ display: "flex", justifyContent: "space-between", gap: 1 }}>
                   <Box sx={{ minWidth: 0 }}>
                     <Typography sx={{ fontWeight: 700, fontSize: "0.9rem" }} noWrap>
@@ -1543,14 +1555,28 @@ export default function MaterialReceipt() {
                   </Grid>
                 </Grid>
 
-                <Box sx={{ display: "flex", justifyContent: "flex-end", gap: 0.5, mt: 0.75 }}>
-                  <IconButton size="small" onClick={() => setViewReceipt(r)} aria-label="View DRC">
-                    <VisibilityIcon fontSize="small" />
-                  </IconButton>
-                  <IconButton size="small" onClick={() => openEditForm(r)} aria-label="Edit DRC">
+                <Box
+                  sx={{ display: "flex", justifyContent: "flex-end", gap: 0.5, mt: 0.75 }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <IconButton
+                    size="small"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openEditForm(r);
+                    }}
+                    aria-label="Edit DRC"
+                  >
                     <EditIcon fontSize="small" />
                   </IconButton>
-                  <IconButton size="small" onClick={() => handlePrint(r)} aria-label="Print DRC">
+                  <IconButton
+                    size="small"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handlePrint(r);
+                    }}
+                    aria-label="Print DRC"
+                  >
                     <PrintIcon fontSize="small" />
                   </IconButton>
                 </Box>
@@ -1579,7 +1605,18 @@ export default function MaterialReceipt() {
               </TableHead>
               <TableBody>
                 {receipts.map((r) => (
-                  <TableRow key={r.id} hover sx={{ height: 60 }}>
+                  <TableRow
+                    key={r.id}
+                    hover
+                    onClick={() => setViewReceipt(r)}
+                    sx={{
+                      height: 60,
+                      cursor: "pointer",
+                      "&:hover": {
+                        bgcolor: "action.hover",
+                      },
+                    }}
+                  >
                     <TableCell sx={{ fontWeight: 700 }}>{r.drc_number}</TableCell>
                     <TableCell>{r.vendor_name}</TableCell>
                     <TableCell>{r.po_number ?? "-"}</TableCell>
@@ -1589,15 +1626,26 @@ export default function MaterialReceipt() {
                     <TableCell>
                       <Chip size="small" label={r.status} color={statusColor(r.status)} sx={{ fontWeight: 700 }} />
                     </TableCell>
-                    <TableCell align="right">
+                    <TableCell align="right" onClick={(e) => e.stopPropagation()}>
                       <Box sx={{ display: "flex", justifyContent: "flex-end" }}>
-                        <IconButton size="small" onClick={() => setViewReceipt(r)} aria-label="View DRC">
-                          <VisibilityIcon fontSize="small" />
-                        </IconButton>
-                        <IconButton size="small" onClick={() => openEditForm(r)} aria-label="Edit DRC">
+                        <IconButton
+                          size="small"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openEditForm(r);
+                          }}
+                          aria-label="Edit DRC"
+                        >
                           <EditIcon fontSize="small" />
                         </IconButton>
-                        <IconButton size="small" onClick={() => handlePrint(r)} aria-label="Print DRC">
+                        <IconButton
+                          size="small"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handlePrint(r);
+                          }}
+                          aria-label="Print DRC"
+                        >
                           <PrintIcon fontSize="small" />
                         </IconButton>
                       </Box>

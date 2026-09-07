@@ -364,7 +364,7 @@ export async function getRfidStockSummary(): Promise<RfidStockRow[]> {
 
   // Fetch material descriptions
   const codes = [...new Set(allTags.map((t) => t.material_code!))];
-  let materialMap: Record<string, { short_description: string; uom: string }> =
+  const materialMap: Record<string, { short_description: string; uom: string }> =
     {};
 
   if (codes.length > 0) {
