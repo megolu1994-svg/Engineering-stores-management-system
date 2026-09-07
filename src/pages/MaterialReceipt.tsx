@@ -1563,16 +1563,6 @@ export default function MaterialReceipt() {
                     size="small"
                     onClick={(e) => {
                       e.stopPropagation();
-                      openEditForm(r);
-                    }}
-                    aria-label="Edit DRC"
-                  >
-                    <EditIcon fontSize="small" />
-                  </IconButton>
-                  <IconButton
-                    size="small"
-                    onClick={(e) => {
-                      e.stopPropagation();
                       handlePrint(r);
                     }}
                     aria-label="Print DRC"
@@ -1628,16 +1618,6 @@ export default function MaterialReceipt() {
                     </TableCell>
                     <TableCell align="right" onClick={(e) => e.stopPropagation()}>
                       <Box sx={{ display: "flex", justifyContent: "flex-end" }}>
-                        <IconButton
-                          size="small"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openEditForm(r);
-                          }}
-                          aria-label="Edit DRC"
-                        >
-                          <EditIcon fontSize="small" />
-                        </IconButton>
                         <IconButton
                           size="small"
                           onClick={(e) => {
