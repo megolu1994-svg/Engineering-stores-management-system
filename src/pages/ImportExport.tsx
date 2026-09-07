@@ -68,17 +68,7 @@ async function readExcelFile(
   return json as Record<string, unknown>[];
 }
 
-function downloadWorkbook(
-  headers: string[],
-  rows: (string | number)[][],
-  filename: string
-) {
-  const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-  worksheet["!cols"] = headers.map(() => ({ wch: 22 }));
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Template");
-  XLSX.writeFile(workbook, filename);
-}
+import { exportStyledTemplate } from "../utils/styledExcelExport";
 
 function isDuplicateError(errors: string[]) {
   return errors.some((e) => e.toLowerCase().includes("duplicate"));
@@ -160,16 +150,22 @@ export default function ImportExport() {
   }
 
   function handleDownloadMaterialTemplate() {
-    downloadWorkbook(
-      ["Material Code", "Description", "UoM", "HSN Code"],
-      [
+    exportStyledTemplate({
+      filename: "ESMS_Material_Template.xlsx",
+      sheetName: "Material Template",
+      columns: [
+        { header: "Material Code", required: true, headerColor: "1E3A8A", width: 22 },
+        { header: "Description", required: true, headerColor: "0F766E", width: 35 },
+        { header: "UoM", required: true, headerColor: "0284C7", width: 14, align: "center" },
+        { header: "HSN Code", required: false, headerColor: "B45309", width: 18, align: "center" },
+      ],
+      sampleRows: [
         ["9000000001", "SAMPLE BEARING 6205 2RS", "EA", "84821000"],
         ["9000000002", "SAMPLE GASKET SET", "EA", "40169300"],
         ["9000000003", "SAMPLE HYDRAULIC OIL 68", "L", "27101983"],
       ],
-      "ESMS_Material_Template.xlsx"
-    );
-    showSnackbar("Material template downloaded.", "success");
+    });
+    showSnackbar("Material template downloaded with styled columns.", "success");
   }
 
   function handleMaterialFileChange(e: ChangeEvent<HTMLInputElement>) {
@@ -292,16 +288,20 @@ export default function ImportExport() {
   }
 
   function handleDownloadLocationTemplate() {
-    downloadWorkbook(
-      ["Location Code", "Description"],
-      [
+    exportStyledTemplate({
+      filename: "ESMS_Location_Template.xlsx",
+      sheetName: "Location Template",
+      columns: [
+        { header: "Location Code", required: true, headerColor: "1E3A8A", width: 22 },
+        { header: "Description", required: true, headerColor: "0F766E", width: 38 },
+      ],
+      sampleRows: [
         ["WH-A-01-01", "Warehouse A, Rack 1, Bin 1"],
         ["WH-A-01-02", "Warehouse A, Rack 1, Bin 2"],
         ["WH-B-02-05", "Warehouse B, Rack 2, Bin 5"],
       ],
-      "ESMS_Location_Template.xlsx"
-    );
-    showSnackbar("Location template downloaded.", "success");
+    });
+    showSnackbar("Location template downloaded with styled columns.", "success");
   }
 
   function handleLocationFileChange(e: ChangeEvent<HTMLInputElement>) {

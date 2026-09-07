@@ -80,17 +80,7 @@ async function readExcelFile(file: File): Promise<Record<string, unknown>[]> {
   >[];
 }
 
-function downloadWorkbook(
-  headers: string[],
-  rows: (string | number)[][],
-  filename: string
-) {
-  const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-  worksheet["!cols"] = headers.map(() => ({ wch: 22 }));
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Template");
-  XLSX.writeFile(workbook, filename);
-}
+import { exportStyledTemplate } from "../utils/styledExcelExport";
 
 export default function LocationMaster() {
   useSwipeOpenDrawer();
@@ -156,17 +146,21 @@ export default function LocationMaster() {
   }
 
   function handleDownloadTemplate() {
-    downloadWorkbook(
-      ["Location Code", "Description"],
-      [
+    exportStyledTemplate({
+      filename: "ESMS_Location_Template.xlsx",
+      sheetName: "Location Template",
+      columns: [
+        { header: "Location Code", required: true, headerColor: "1E3A8A", width: 22 },
+        { header: "Description", required: true, headerColor: "0F766E", width: 38 },
+      ],
+      sampleRows: [
         ["WH-A-01-01", "Warehouse A, Rack 1, Bin 1"],
         ["WH-A-01-02", "Warehouse A, Rack 1, Bin 2"],
         ["WH-B-02-05", "Warehouse B, Rack 2, Bin 5"],
       ],
-      "ESMS_Location_Template.xlsx"
-    );
+    });
     setSnackbarSeverity("success");
-    setSnackbarMessage("Location template downloaded.");
+    setSnackbarMessage("Location template downloaded with styled columns.");
     setSnackbarOpen(true);
   }
 

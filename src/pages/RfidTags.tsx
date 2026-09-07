@@ -66,6 +66,8 @@ import { searchMaterials } from "../services/materialService";
 import type { Material as MaterialType } from "../types/material";
 import { BOTTOM_NAV_OFFSET } from "../components/AppLayout";
 
+import { exportStyledTemplate } from "../utils/styledExcelExport";
+
 /* ------------------------------------------------------------------ */
 /*  Constants                                                         */
 /* ------------------------------------------------------------------ */
@@ -80,25 +82,24 @@ const TAG_TYPE_OPTIONS = ["paper", "adhesive", "metal", "ceramic"];
 /* ------------------------------------------------------------------ */
 
 function downloadTemplate() {
-  const headers = [
-    "rfid_code",
-    "tag_type",
-    "tag_description",
-    "material_code",
-    "quantity",
-    "uom",
-    "storage_location",
-    "notes",
-  ];
-  const rows = [
-    ["E2801160C00000000000001A", "paper", "Drum tag - Batch 1", "219", 50, "KG", "Ware House", ""],
-    ["E2801160C00000000000002B", "paper", "Drum tag - Batch 2", "220", 25, "LTR", "Drum Filling Yard", ""],
-  ];
-  const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-  ws["!cols"] = headers.map(() => ({ wch: 28 }));
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "RFID Tags");
-  XLSX.writeFile(wb, "rfid_master_template.xlsx");
+  exportStyledTemplate({
+    filename: "rfid_master_template.xlsx",
+    sheetName: "RFID Tags",
+    columns: [
+      { header: "rfid_code", required: true, headerColor: "1E3A8A", width: 28 },
+      { header: "tag_type", required: true, headerColor: "0F766E", width: 16 },
+      { header: "tag_description", headerColor: "0284C7", width: 26 },
+      { header: "material_code", headerColor: "B45309", width: 18 },
+      { header: "quantity", headerColor: "4338CA", width: 14, align: "right" },
+      { header: "uom", headerColor: "6B21A8", width: 12, align: "center" },
+      { header: "storage_location", headerColor: "166534", width: 22 },
+      { header: "notes", headerColor: "334155", width: 24 },
+    ],
+    sampleRows: [
+      ["E2801160C00000000000001A", "paper", "Drum tag - Batch 1", "219", 50, "KG", "Ware House", ""],
+      ["E2801160C00000000000002B", "paper", "Drum tag - Batch 2", "220", 25, "LTR", "Drum Filling Yard", ""],
+    ],
+  });
 }
 
 /* ------------------------------------------------------------------ */

@@ -74,6 +74,8 @@ function isDuplicateError(errors: string[]) {
   return errors.some((e) => e.toLowerCase().includes("duplicate"));
 }
 
+import { exportStyledTemplate } from "../utils/styledExcelExport";
+
 async function readExcelFile(file: File): Promise<Record<string, unknown>[]> {
   const buffer = await file.arrayBuffer();
   const workbook = XLSX.read(buffer, { type: "array" });
@@ -83,18 +85,6 @@ async function readExcelFile(file: File): Promise<Record<string, unknown>[]> {
     string,
     unknown
   >[];
-}
-
-function downloadWorkbook(
-  headers: string[],
-  rows: (string | number)[][],
-  filename: string
-) {
-  const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-  worksheet["!cols"] = headers.map(() => ({ wch: 22 }));
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Template");
-  XLSX.writeFile(workbook, filename);
 }
 
 export default function MaterialMaster() {
@@ -162,17 +152,23 @@ export default function MaterialMaster() {
   }
 
   function handleDownloadTemplate() {
-    downloadWorkbook(
-      ["Material Code", "Description", "UoM", "HSN Code"],
-      [
+    exportStyledTemplate({
+      filename: "ESMS_Material_Template.xlsx",
+      sheetName: "Material Template",
+      columns: [
+        { header: "Material Code", required: true, headerColor: "1E3A8A", width: 22 },
+        { header: "Description", required: true, headerColor: "0F766E", width: 35 },
+        { header: "UoM", required: true, headerColor: "0284C7", width: 14, align: "center" },
+        { header: "HSN Code", required: false, headerColor: "B45309", width: 18, align: "center" },
+      ],
+      sampleRows: [
         ["9000000001", "SAMPLE BEARING 6205 2RS", "EA", "84821000"],
         ["9000000002", "SAMPLE GASKET SET", "EA", "40169300"],
         ["9000000003", "SAMPLE HYDRAULIC OIL 68", "L", "27101983"],
       ],
-      "ESMS_Material_Template.xlsx"
-    );
+    });
     setSnackbarSeverity("success");
-    setSnackbarMessage("Material template downloaded.");
+    setSnackbarMessage("Material template downloaded with styled columns.");
     setSnackbarOpen(true);
   }
 

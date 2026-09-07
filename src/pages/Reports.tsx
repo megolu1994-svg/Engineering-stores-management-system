@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
@@ -73,6 +72,8 @@ import {
   downloadHistoryReport,
   type BulkImportHistoryListItem,
 } from "../services/bulkImportHistoryService";
+import { exportStyledExcel, type StyledExcelColumn } from "../utils/styledExcelExport";
+import { exportDrcRegisterExcel } from "../utils/drcRegisterExport";
 
 function safeNumber(value: number | string | null | undefined): number {
   const n = Number(value);
@@ -110,9 +111,9 @@ function formatReportDateTime(value: string | null): string {
 }
 
 interface DownloadWorkbookOptions {
-  /** Custom column widths (default: all 20). */
+  /** Custom column widths (default: auto). */
   colWidths?: { wch: number }[];
-  /** Hex color for header cell fill, e.g. "8DB4E2". */
+  /** Hex color for header cell fill. */
   headerFillColor?: string;
   /** Whether to add auto-filter on the header row. */
   autoFilter?: boolean;
@@ -125,42 +126,54 @@ function downloadWorkbook(
   sheetName: string,
   opts?: DownloadWorkbookOptions
 ) {
-  const data = [headers, ...rows];
-  const worksheet = XLSX.utils.aoa_to_sheet(data);
-  worksheet["!cols"] = opts?.colWidths ?? headers.map(() => ({ wch: 20 }));
+  // Vibrant, professional column header palette for all bulk report downloads
+  const headerColors = [
+    "1E3A8A", // Deep Navy
+    "0F766E", // Teal
+    "0284C7", // Ocean Blue
+    "B45309", // Amber
+    "4338CA", // Indigo
+    "6B21A8", // Purple
+    "166534", // Forest Green
+    "334155", // Slate
+    "BE123C", // Rose
+    "C2410C", // Orange
+  ];
 
-  /* Apply header styling when requested. */
-  if (opts?.headerFillColor) {
-    const range = XLSX.utils.decode_range(worksheet["!ref"] ?? "A1");
-    for (let c = range.s.c; c <= range.e.c; c++) {
-      const addr = XLSX.utils.encode_cell({ r: range.s.r, c });
-      const cell = worksheet[addr];
-      if (cell) {
-        cell.s = {
-          font: { bold: true, color: { rgb: "FFFFFF" }, sz: 11 },
-          fill: { fgColor: { rgb: opts.headerFillColor }, patternType: "solid" },
-          alignment: { horizontal: "center", vertical: "center", wrapText: true },
-        };
-      }
-    }
-  }
+  const columns: StyledExcelColumn[] = headers.map((header, idx) => {
+    const isNum = rows.some((r) => typeof r[idx] === "number");
+    const hLower = header.toLowerCase();
+    const isCur =
+      hLower.includes("value") ||
+      hLower.includes("amount") ||
+      hLower.includes("price") ||
+      hLower.includes("cost") ||
+      hLower.includes("valuation");
+    const isDate = hLower.includes("date") || hLower.includes("time");
+    const isCode =
+      hLower.includes("code") ||
+      hLower.includes("no") ||
+      hLower.includes("drc") ||
+      hLower.includes("uom") ||
+      hLower.includes("s.no");
 
-  /* Auto-filter for table-style registers. */
-  if (opts?.autoFilter && rows.length > 0) {
-    const range = XLSX.utils.decode_range(workbook_sref(worksheet));
-    worksheet["!autofilter"] = {
-      ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: range.e.r, c: range.e.c } }),
+    return {
+      header,
+      headerColor: opts?.headerFillColor || headerColors[idx % headerColors.length],
+      width: opts?.colWidths?.[idx]?.wch,
+      align: isNum ? "right" : isDate || isCode ? "center" : "left",
+      isNumber: isNum,
+      isCurrency: isCur,
     };
-  }
+  });
 
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
-  XLSX.writeFile(workbook, filename);
-}
-
-/** Safely read the sheet range ref, falling back to A1. */
-function workbook_sref(ws: XLSX.WorkSheet): string {
-  return ws["!ref"] ?? "A1";
+  exportStyledExcel({
+    filename,
+    sheetName,
+    columns,
+    rows,
+    autoFilter: opts?.autoFilter ?? true,
+  });
 }
 
 function downloadPdf(
@@ -783,6 +796,14 @@ export default function Reports() {
     const month = now.getMonth() + 1;
     const currentFyStart = month >= 4 ? year : year - 1;
     const options: { label: string; start: string; end: string }[] = [];
+
+    // All DRCs option
+    options.push({
+      label: "All Financial Years (All DRCs)",
+      start: "ALL",
+      end: "ALL",
+    });
+
     for (let y = currentFyStart; y >= currentFyStart - 4; y--) {
       const startYY = String(y).slice(-2);
       const endYY = String(y + 1).slice(-2);
@@ -796,7 +817,8 @@ export default function Reports() {
   }
 
   const fyOptions = useMemo(() => buildFyOptions(), []);
-  const [drcRegisterFy, setDrcRegisterFy] = useState(fyOptions[0]?.label ?? "");
+  // Default to current FY (second item) or first item
+  const [drcRegisterFy, setDrcRegisterFy] = useState(fyOptions[1]?.label ?? fyOptions[0]?.label ?? "");
   const [drcRegisterRows, setDrcRegisterRows] = useState<Record<string, unknown>[]>([]);
   const [loadingDrcRegister, setLoadingDrcRegister] = useState(false);
   const [drcRegisterError, setDrcRegisterError] = useState<string | null>(null);
@@ -805,15 +827,6 @@ export default function Reports() {
     () => fyOptions.find((o) => o.label === drcRegisterFy) ?? fyOptions[0],
     [drcRegisterFy, fyOptions]
   );
-
-  /** All 24 columns matching the Excel DRC Register. */
-  const DRC_REGISTER_SELECT =
-    "id, drc_number, receipt_datetime, vendor_name, sap_po_number, gem_order_number, " +
-    "package_details, receipt_mode, vehicle_number, driver_name, " +
-    "challan_number, challan_date, invoice_number, invoice_date, tax_invoice_value, " +
-    "eway_bill_number, eway_bill_date, net_weight, " +
-    "msme_type, inspection_date, inspection_remarks, " +
-    "important_note, grn_number, grn_date, delivery_location, vim_approval, status";
 
   /** Helper to safely read a string key from a raw Supabase row. */
   const s = (r: Record<string, unknown>, k: string) => (r[k] as string) ?? "";
@@ -841,122 +854,68 @@ export default function Reports() {
     return "-";
   };
 
-  async function fetchDrcRegister() {
-    if (!selectedFy) return;
+  async function fetchDrcRegister(): Promise<Record<string, unknown>[]> {
+    if (!selectedFy) return [];
     setLoadingDrcRegister(true);
     setDrcRegisterError(null);
     try {
-      const { data, error } = await supabase
-        .from("receipt_header")
-        .select(DRC_REGISTER_SELECT)
-        .gte("receipt_datetime", selectedFy.start)
-        .lt("receipt_datetime", selectedFy.end)
-        .order("receipt_datetime", { ascending: true });
+      let query = supabase.from("receipt_header").select("*");
+
+      if (selectedFy.start && selectedFy.start !== "ALL") {
+        query = query.or(
+          `and(receipt_datetime.gte.${selectedFy.start},receipt_datetime.lt.${selectedFy.end}),and(receipt_datetime.is.null,created_at.gte.${selectedFy.start},created_at.lt.${selectedFy.end})`
+        );
+      }
+
+      const { data, error } = await query.order("receipt_datetime", { ascending: false });
       if (error) throw error;
-      setDrcRegisterRows((data ?? []) as unknown as Record<string, unknown>[]);
+      const rows = (data ?? []) as unknown as Record<string, unknown>[];
+      setDrcRegisterRows(rows);
+      return rows;
     } catch (err) {
       console.error(err);
       setDrcRegisterError("Failed to load DRC register.");
       setDrcRegisterRows([]);
+      return [];
     } finally {
       setLoadingDrcRegister(false);
     }
   }
 
-  /** 24-column Excel export matching the user's DRC Register spreadsheet. */
-  function handleExportDrcRegisterExcel() {
-    const headers = [
-      "Date",           // A
-      "DRC",            // B
-      "Vendor's Name",  // C
-      "PO No.",         // D
-      "GeM Contract No.", // E
-      "Material Description", // F
-      "Package Quantity", // G
-      "Mode of Dispatch", // H
-      "LR No./Challan No./Bill No./RR No. & Date", // I
-      "Tax Invoice No.", // J
-      "Tax Invoice Date", // K
-      "Tax Invoice Value", // L
-      "E-Waybill No.",  // M
-      "E-Waybill Date", // N
-      "Weight of the Consignment (Kg)", // O
-      "1st Date of Mail for Inspection of DRC File", // P
-      "MSME / Non MSME", // Q
-      "Date of Inspection", // R
-      "Discrepancy Details", // S
-      "Important Note", // T
-      "GRN No.",        // U
-      "GRN Date",       // V
-      "LOCATION",       // W
-      "VIM approval",   // X
-    ];
-    const rows = drcRegisterRows.map((r) => [
-      formatReportDate(s(r, "receipt_datetime")),
-      s(r, "drc_number"),
-      s(r, "vendor_name"),
-      s(r, "sap_po_number") || s(r, "gem_order_number"),
-      s(r, "gem_order_number"),
-      matDesc(r),
-      String(pkgQty(r)),
-      s(r, "receipt_mode") === "Hand" ? "BY HAND" : s(r, "vehicle_number") || s(r, "receipt_mode"),
-      lrChallan(r),
-      s(r, "invoice_number"),
-      formatReportDate(s(r, "invoice_date") || null),
-      n(r, "tax_invoice_value"),
-      s(r, "eway_bill_number"),
-      formatReportDate(s(r, "eway_bill_date") || null),
-      n(r, "net_weight"),
-      formatReportDate(s(r, "receipt_datetime")),
-      s(r, "msme_type"),
-      formatReportDate(s(r, "inspection_date") || null),
-      s(r, "inspection_remarks"),
-      s(r, "important_note"),
-      s(r, "grn_number"),
-      formatReportDate(s(r, "grn_date") || null),
-      s(r, "delivery_location"),
-      s(r, "vim_approval"),
-    ]);
-    downloadWorkbook(headers, rows, `DRC_Register_${selectedFy?.label ?? ""}.xlsx`, "DRC Register", {
-      headerFillColor: "8DB4E2",
-      autoFilter: true,
-      colWidths: [
-        { wch: 12 },  // A  Date
-        { wch: 8 },   // B  DRC
-        { wch: 30 },  // C  Vendor's Name
-        { wch: 14 },  // D  PO No.
-        { wch: 22 },  // E  GeM Contract No.
-        { wch: 30 },  // F  Material Description
-        { wch: 18 },  // G  Package Quantity
-        { wch: 16 },  // H  Mode of Dispatch
-        { wch: 30 },  // I  LR No./Challan No./Bill No./RR No. & Date
-        { wch: 20 },  // J  Tax Invoice No.
-        { wch: 14 },  // K  Tax Invoice Date
-        { wch: 16 },  // L  Tax Invoice Value
-        { wch: 22 },  // M  E-Waybill No.
-        { wch: 14 },  // N  E-Waybill Date
-        { wch: 14 },  // O  Weight
-        { wch: 18 },  // P  1st Date of Mail for Inspection
-        { wch: 16 },  // Q  MSME / Non MSME
-        { wch: 14 },  // R  Date of Inspection
-        { wch: 20 },  // S  Discrepancy Details
-        { wch: 18 },  // T  Important Note
-        { wch: 16 },  // U  GRN No.
-        { wch: 14 },  // V  GRN Date
-        { wch: 18 },  // W  LOCATION
-        { wch: 16 },  // X  VIM approval
-      ],
-    });
+  // Automatically fetch DRC register on selection change
+  useEffect(() => {
+    fetchDrcRegister();
+  }, [drcRegisterFy]);
+
+  /** Systematic, color-coded, complete DRC Register Excel export. */
+  async function handleExportDrcRegisterExcel() {
+    let rowsToExport = drcRegisterRows;
+    if (rowsToExport.length === 0) {
+      rowsToExport = await fetchDrcRegister();
+    }
+    if (rowsToExport.length === 0) {
+      setDrcRegisterError("No DRC records found for the selected period.");
+      return;
+    }
+    exportDrcRegisterExcel(rowsToExport, selectedFy?.label ?? "DRC_Register");
   }
 
-  /** 24-column PDF export. */
-  function handleExportDrcRegisterPdf() {
+  /** PDF export with all standard fields. */
+  async function handleExportDrcRegisterPdf() {
+    let rowsToExport = drcRegisterRows;
+    if (rowsToExport.length === 0) {
+      rowsToExport = await fetchDrcRegister();
+    }
+    if (rowsToExport.length === 0) {
+      setDrcRegisterError("No DRC records found for the selected period.");
+      return;
+    }
     const doc = new jsPDF({ orientation: "landscape" });
     doc.setFontSize(14);
     doc.text(`DRC Register — ${selectedFy?.label ?? ""}`, 14, 18);
     doc.setFontSize(9);
     doc.text(`Generated: ${new Date().toLocaleDateString("en-IN")}`, 14, 25);
-    const body = drcRegisterRows.map((r) => [
+    const body = rowsToExport.map((r) => [
       formatReportDate(s(r, "receipt_datetime")),
       s(r, "drc_number"),
       s(r, "vendor_name"),
@@ -987,10 +946,10 @@ export default function Reports() {
       head: [["Date", "DRC", "Vendor's Name", "PO No.", "GeM Contract No.", "Material Description", "Package Quantity", "Mode of Dispatch", "LR No./Challan No./Bill No./RR No. & Date", "Tax Invoice No.", "Tax Invoice Date", "Tax Invoice Value", "E-Waybill No.", "E-Waybill Date", "Weight of the Consignment (Kg)", "1st Date of Mail for Inspection of DRC File", "MSME / Non MSME", "Date of Inspection", "Discrepancy Details", "Important Note", "GRN No.", "GRN Date", "LOCATION", "VIM approval"]],
       body,
       styles: { fontSize: 5.5, cellPadding: 1.2, overflow: "linebreak" },
-      headStyles: { fillColor: [141, 180, 226], textColor: 255, fontStyle: "bold", halign: "center" },
+      headStyles: { fillColor: [30, 58, 138], textColor: 255, fontStyle: "bold", halign: "center" },
       columnStyles: { 5: { cellWidth: 25 }, 8: { cellWidth: 30 } },
     });
-    doc.save(`DRC_Register_${selectedFy?.label ?? ""}.pdf`);
+    doc.save(`DRC_Register_${selectedFy?.label.replace(/[^a-zA-Z0-9_-]/g, "_") ?? ""}.pdf`);
   }
 
   // ---------------- Movement History ----------------
@@ -1586,14 +1545,31 @@ export default function Reports() {
                 </FormControl>
 
                 <Button
-                  variant="contained"
+                  variant="outlined"
                   size="small"
-                  startIcon={loadingDrcRegister ? <CircularProgress size={14} color="inherit" /> : <DownloadIcon fontSize="small" />}
+                  startIcon={loadingDrcRegister ? <CircularProgress size={14} color="inherit" /> : <SearchIcon fontSize="small" />}
                   disabled={loadingDrcRegister}
                   onClick={fetchDrcRegister}
                   sx={{ borderRadius: 2, fontWeight: 600, minHeight: 36 }}
                 >
                   Load Register
+                </Button>
+
+                <Button
+                  variant="contained"
+                  size="small"
+                  startIcon={loadingDrcRegister ? <CircularProgress size={14} color="inherit" /> : <DownloadIcon fontSize="small" />}
+                  disabled={loadingDrcRegister}
+                  onClick={handleExportDrcRegisterExcel}
+                  sx={{
+                    borderRadius: 2,
+                    fontWeight: 600,
+                    minHeight: 36,
+                    bgcolor: "#1E3A8A",
+                    "&:hover": { bgcolor: "#172554" },
+                  }}
+                >
+                  Export Excel (Styled)
                 </Button>
               </Box>
 

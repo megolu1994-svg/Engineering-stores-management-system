@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import * as XLSX from "xlsx";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 
@@ -56,6 +55,7 @@ import {
   type SapStockReview,
   type SapStockRow,
 } from "../services/sapHistoryService";
+import { exportStyledExcel } from "../utils/styledExcelExport";
 import SapReviewDialog from "../components/SapReviewDialog";
 import SapMaterialHistoryPopup from "../components/SapMaterialHistoryPopup";
 
@@ -285,13 +285,13 @@ function visiblePages(current: number, pageCount: number): (number | "…")[] {
 /* ------------------------------------------------------------------ */
 
 function downloadExcel(rows: SapStockRow[], label: string): void {
-  const header = [
-    "Material",
-    "Description",
-    "UoM",
-    "Storage Location (SLoc)",
-    "Total Stock",
-    "Status",
+  const columns = [
+    { header: "Material", headerColor: "1E3A8A", width: 18 },
+    { header: "Description", headerColor: "0F766E", width: 35 },
+    { header: "UoM", headerColor: "0284C7", width: 12, align: "center" as const },
+    { header: "Storage Location (SLoc)", headerColor: "4338CA", width: 30 },
+    { header: "Total Stock", headerColor: "166534", width: 16, align: "right" as const },
+    { header: "Status", headerColor: "B45309", width: 16, align: "center" as const },
   ];
 
   const body = rows.map((row) => [
@@ -303,11 +303,13 @@ function downloadExcel(rows: SapStockRow[], label: string): void {
     statusText(row),
   ]);
 
-  const ws = XLSX.utils.aoa_to_sheet([header, ...body]);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "SAP Stock");
-
-  XLSX.writeFile(wb, `${safeFileName(label)}_SAP_Stock.xlsx`);
+  exportStyledExcel({
+    filename: `${safeFileName(label)}_SAP_Stock.xlsx`,
+    sheetName: "SAP Stock",
+    columns,
+    rows: body,
+    autoFilter: true,
+  });
 }
 
 function downloadPdf(rows: SapStockRow[], label: string): void {

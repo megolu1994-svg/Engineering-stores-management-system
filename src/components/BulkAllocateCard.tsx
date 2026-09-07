@@ -95,17 +95,7 @@ async function readExcelFile(
   >[];
 }
 
-function downloadWorkbook(
-  headers: string[],
-  rows: (string | number)[][],
-  filename: string
-) {
-  const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-  worksheet["!cols"] = headers.map(() => ({ wch: 22 }));
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, "Template");
-  XLSX.writeFile(workbook, filename);
-}
+import { exportStyledTemplate } from "../utils/styledExcelExport";
 
 interface Props {
   onShowSnackbar: (message: string, severity: SnackbarSeverity) => void;
@@ -131,15 +121,20 @@ export default function BulkAllocateCard({
   );
 
   function handleDownloadTemplate() {
-    downloadWorkbook(
-      ["Material Code", "Location Code", "Quantity"],
-      [
+    exportStyledTemplate({
+      filename: "ESMS_Bulk_Allocate_Template.xlsx",
+      sheetName: "Bulk Allocate Template",
+      columns: [
+        { header: "Material Code", required: true, headerColor: "1E3A8A", width: 22 },
+        { header: "Location Code", required: true, headerColor: "0F766E", width: 22 },
+        { header: "Quantity", required: true, headerColor: "B45309", width: 16, align: "right" },
+      ],
+      sampleRows: [
         ["9000000001", "CS/HD35 BIN A", 10],
         ["9000000002", "CS/HD35 BIN B", 25],
       ],
-      "ESMS_Bulk_Allocate_Template.xlsx"
-    );
-    onShowSnackbar("Bulk allocate template downloaded.", "success");
+    });
+    onShowSnackbar("Bulk allocate template downloaded with styled columns.", "success");
   }
 
   function handleFileChange(e: ChangeEvent<HTMLInputElement>) {

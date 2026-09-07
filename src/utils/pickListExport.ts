@@ -1,4 +1,4 @@
-import * as XLSX from "xlsx";
+import XLSX from "xlsx-js-style";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 
@@ -95,26 +95,77 @@ export function exportPickListExcel(
   filename: string
 ): void {
   const pickRows = buildPickListRows(rows);
-
   const workbook = XLSX.utils.book_new();
 
-  const pickSheet = XLSX.utils.aoa_to_sheet([
-    PICK_LIST_HEADERS,
-    ...pickRows.map((r) => [
-      r.material_code,
-      r.short_description,
-      r.uom,
-      r.location_code,
-      r.quantity,
-    ]),
-  ]);
-  pickSheet["!cols"] = [
-    { wch: 16 },
-    { wch: 45 },
-    { wch: 8 },
-    { wch: 18 },
-    { wch: 10 },
+  const pickColStyles = [
+    { header: "Material Code", color: "1E3A8A", wch: 18, align: "left" },
+    { header: "Short Description", color: "0F766E", wch: 45, align: "left" },
+    { header: "UoM", color: "0284C7", wch: 10, align: "center" },
+    { header: "Location Code", color: "4338CA", wch: 20, align: "left" },
+    { header: "Quantity", color: "166534", wch: 14, align: "right" },
   ];
+
+  const pickBody = pickRows.map((r) => [
+    r.material_code,
+    r.short_description,
+    r.uom,
+    r.location_code,
+    r.quantity,
+  ]);
+
+  const pickSheet = XLSX.utils.aoa_to_sheet([
+    pickColStyles.map((c) => c.header),
+    ...pickBody,
+  ]);
+
+  pickSheet["!cols"] = pickColStyles.map((c) => ({ wch: c.wch }));
+
+  // Style Pick List header row
+  pickColStyles.forEach((c, idx) => {
+    const cellAddr = XLSX.utils.encode_cell({ r: 0, c: idx });
+    if (pickSheet[cellAddr]) {
+      pickSheet[cellAddr].s = {
+        fill: { fgColor: { rgb: c.color } },
+        font: { bold: true, color: { rgb: "FFFFFF" }, sz: 11 },
+        alignment: { horizontal: c.align === "right" ? "right" : c.align === "center" ? "center" : "left", vertical: "center" },
+        border: {
+          top: { style: "thin", color: { rgb: "CBD5E1" } },
+          bottom: { style: "medium", color: { rgb: "475569" } },
+          left: { style: "thin", color: { rgb: "CBD5E1" } },
+          right: { style: "thin", color: { rgb: "CBD5E1" } },
+        },
+      };
+    }
+  });
+
+  // Style Pick List data rows
+  pickBody.forEach((row, rIdx) => {
+    const isEven = rIdx % 2 === 0;
+    row.forEach((_, cIdx) => {
+      const cellAddr = XLSX.utils.encode_cell({ r: rIdx + 1, c: cIdx });
+      if (pickSheet[cellAddr]) {
+        pickSheet[cellAddr].s = {
+          fill: { fgColor: { rgb: isEven ? "FFFFFF" : "F8FAFC" } },
+          alignment: {
+            horizontal: pickColStyles[cIdx].align,
+            vertical: "center",
+          },
+          border: {
+            top: { style: "thin", color: { rgb: "E2E8F0" } },
+            bottom: { style: "thin", color: { rgb: "E2E8F0" } },
+            left: { style: "thin", color: { rgb: "E2E8F0" } },
+            right: { style: "thin", color: { rgb: "E2E8F0" } },
+          },
+        };
+      }
+    });
+  });
+
+  // Auto filter
+  pickSheet["!autofilter"] = {
+    ref: `A1:${XLSX.utils.encode_cell({ r: pickBody.length, c: pickColStyles.length - 1 })}`,
+  };
+
   XLSX.utils.book_append_sheet(workbook, pickSheet, "Pick List");
 
   if (notFound.length > 0) {
@@ -122,7 +173,29 @@ export function exportPickListExcel(
       ["Material Code"],
       ...notFound.map((code) => [code]),
     ]);
-    notFoundSheet["!cols"] = [{ wch: 20 }];
+    notFoundSheet["!cols"] = [{ wch: 22 }];
+    const headerCell = notFoundSheet["A1"];
+    if (headerCell) {
+      headerCell.s = {
+        fill: { fgColor: { rgb: "991B1B" } },
+        font: { bold: true, color: { rgb: "FFFFFF" }, sz: 11 },
+        alignment: { horizontal: "left", vertical: "center" },
+      };
+    }
+    notFound.forEach((_, rIdx) => {
+      const cellAddr = XLSX.utils.encode_cell({ r: rIdx + 1, c: 0 });
+      if (notFoundSheet[cellAddr]) {
+        notFoundSheet[cellAddr].s = {
+          fill: { fgColor: { rgb: "FEF2F2" } },
+          border: {
+            top: { style: "thin", color: { rgb: "FECACA" } },
+            bottom: { style: "thin", color: { rgb: "FECACA" } },
+            left: { style: "thin", color: { rgb: "FECACA" } },
+            right: { style: "thin", color: { rgb: "FECACA" } },
+          },
+        };
+      }
+    });
     XLSX.utils.book_append_sheet(workbook, notFoundSheet, "Not Found");
   }
 

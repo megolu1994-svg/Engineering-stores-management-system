@@ -93,7 +93,6 @@ import {
   importGrn,
   downloadGrnImportReport,
   getGrnHistory,
-  buildGrnTemplateRows,
   // Documents
   addReceiptDocument,
   removeReceiptDocument,
@@ -126,6 +125,7 @@ import {
   buildFullDrcDocumentHtml,
   executePrint,
 } from "../utils/drcPrintUtils";
+import { exportStyledTemplate } from "../utils/styledExcelExport";
 
 type SnackbarSeverity = "success" | "error" | "warning" | "info";
 
@@ -1221,12 +1221,19 @@ export default function MaterialReceipt() {
   }
 
   function handleDownloadGrnTemplate() {
-    const { headers, rows } = buildGrnTemplateRows();
-    const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-    worksheet["!cols"] = headers.map(() => ({ wch: 22 }));
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "GRN Template");
-    XLSX.writeFile(workbook, "GRN_Import_Template.xlsx");
+    exportStyledTemplate({
+      filename: "GRN_Import_Template.xlsx",
+      sheetName: "GRN Template",
+      columns: [
+        { header: "Material Code", required: true, headerColor: "1E3A8A", width: 22 },
+        { header: "Quantity", required: true, headerColor: "0F766E", width: 16, align: "right" },
+      ],
+      sampleRows: [
+        ["9000000001", 10],
+        ["9000000002", 25],
+      ],
+    });
+    showSnackbar("GRN import template downloaded with styled columns.", "success");
   }
 
   function handleGrnFileChange(e: ChangeEvent<HTMLInputElement>) {

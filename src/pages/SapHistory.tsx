@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import * as XLSX from "xlsx";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 
@@ -59,6 +58,7 @@ import {
   getSapHistoryPage,
   type SapDocument,
 } from "../services/sapHistoryService";
+import { exportStyledExcel } from "../utils/styledExcelExport";
 import { getMovementTypeDescription } from "../utils/sapMovementTypes";
 
 type SnackbarSeverity = "success" | "error" | "warning" | "info";
@@ -533,21 +533,21 @@ function MobileHistoryCard({
 /* ------------------------------------------------------------------ */
 
 function downloadExcel(docs: SapDocument[], label: string): void {
-  const header = [
-    "Posting Date",
-    "Movement Type",
-    "Material",
-    "Storage Location",
-    "Quantity",
-    "Balance",
-    "Unit",
-    "Material Document",
-    "Doc Item",
-    "Doc Header Text",
-    "PO",
-    "Vendor",
-    "Invoice",
-    "User",
+  const columns = [
+    { header: "Posting Date", headerColor: "1E3A8A", width: 15, align: "center" as const },
+    { header: "Movement Type", headerColor: "0F766E", width: 16, align: "center" as const },
+    { header: "Material", headerColor: "0284C7", width: 16 },
+    { header: "Storage Location", headerColor: "4338CA", width: 18 },
+    { header: "Quantity", headerColor: "166534", width: 14, align: "right" as const },
+    { header: "Balance", headerColor: "15803D", width: 14, align: "right" as const },
+    { header: "Unit", headerColor: "6B21A8", width: 10, align: "center" as const },
+    { header: "Material Document", headerColor: "B45309", width: 18 },
+    { header: "Doc Item", headerColor: "78350F", width: 12, align: "center" as const },
+    { header: "Doc Header Text", headerColor: "334155", width: 22 },
+    { header: "PO", headerColor: "1E293B", width: 16 },
+    { header: "Vendor", headerColor: "374151", width: 22 },
+    { header: "Invoice", headerColor: "475569", width: 16 },
+    { header: "User", headerColor: "64748B", width: 16 },
   ];
 
   const rows = docs.map((d) => [
@@ -567,11 +567,13 @@ function downloadExcel(docs: SapDocument[], label: string): void {
     d.user_name ?? "",
   ]);
 
-  const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "SAP History");
-
-  XLSX.writeFile(wb, `${safeFileName(label)}_SAP_History.xlsx`);
+  exportStyledExcel({
+    filename: `${safeFileName(label)}_SAP_History.xlsx`,
+    sheetName: "SAP History",
+    columns,
+    rows,
+    autoFilter: true,
+  });
 }
 
 function downloadPdf(docs: SapDocument[], label: string): void {
