@@ -567,6 +567,124 @@ export function buildStrapPrintDocument(
 }
 
 /**
+ * Builds HTML for bulk edge strap printing of multiple DRCs.
+ * Stacks multiple horizontal edge straps on single page(s) with clean scissor cut lines
+ * between each strap, allowing users to cut multiple straps from a single A4 sheet without paper waste.
+ */
+export function buildBulkEdgeStrapPrintDocument(
+  receipts: ReceiptHeader[],
+  _options: StrapPrintOptions = { format: "horizontal_edge_strap" }
+): string {
+  if (!receipts || receipts.length === 0) {
+    return "";
+  }
+
+  const strapsHtml = receipts
+    .map((receipt) => {
+      const drcDate = formatPrintDate(receipt.receipt_datetime || receipt.created_at);
+      const poNumber =
+        receipt.sap_po_number ||
+        receipt.po_number ||
+        (receipt.gem_order_number ? `GeM:${receipt.gem_order_number}` : "-");
+      const vendorName = receipt.vendor_name || "-";
+      const displayDrc = receipt.drc_number?.trim() || "-";
+
+      return `
+        <div class="strap-wrapper" style="page-break-inside: avoid; break-inside: avoid; margin: 0; padding: 0; width: 100%; box-sizing: border-box;">
+          <table style="width: 100%; border-collapse: collapse; border: 2.5px solid #000000; border-radius: 4px; background: #ffffff; table-layout: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; box-sizing: border-box;">
+            <tbody>
+              <tr>
+                <!-- 1. DRC Number with Date -->
+                <td style="white-space: nowrap; width: 1%; padding: 8px 12px; border-right: 2.5px solid #000000; vertical-align: middle;">
+                  <div style="display: flex; align-items: baseline; gap: 6px;">
+                    <span style="font-size: 16px; font-weight: 900; font-family: 'Consolas', 'Courier New', Courier, monospace; color: #000000; letter-spacing: 0.5px;">${displayDrc}</span>
+                    <span style="font-size: 13px; font-weight: 800; color: #000000;">(Dt: ${drcDate})</span>
+                  </div>
+                </td>
+
+                <!-- 2. PO Number -->
+                <td style="white-space: nowrap; width: 1%; padding: 8px 12px; border-right: 2.5px solid #000000; vertical-align: middle;">
+                  <div style="display: flex; align-items: baseline; gap: 5px;">
+                    <span style="font-size: 11.5px; font-weight: 900; color: #000000; letter-spacing: 0.5px;">PO:</span>
+                    <span style="font-size: 15px; font-weight: 900; font-family: 'Consolas', 'Courier New', Courier, monospace; color: #000000;">${poNumber}</span>
+                  </div>
+                </td>
+
+                <!-- 3. Vendor Name & Code -->
+                <td style="width: 98%; padding: 8px 12px; vertical-align: middle; text-align: left;">
+                  <div style="display: flex; align-items: baseline; gap: 6px; min-width: 0;">
+                    <span style="font-size: 11.5px; font-weight: 900; color: #000000; letter-spacing: 0.5px; flex-shrink: 0;">VENDOR:</span>
+                    <span style="font-size: 14.5px; font-weight: 900; color: #000000; line-height: 1.25; word-break: break-word;">
+                      ${vendorName}
+                    </span>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <!-- Scissor Cut Guide after each strap -->
+          <div style="display: flex; align-items: center; margin-top: 3px; margin-bottom: 3px; color: #000000;">
+            <span style="font-size: 16px; line-height: 1;">✂</span>
+            <span style="flex: 1; border-bottom: 2px dashed #000000; margin: 0 6px;"></span>
+            <span style="font-size: 16px; line-height: 1;">✂</span>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>DRC Edge Straps - Bulk Print (${receipts.length} Straps)</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <style>
+          @page {
+            size: A4;
+            margin: 5mm 6mm;
+          }
+          * {
+            box-sizing: border-box;
+          }
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: #ffffff;
+            color: #0f172a;
+            margin: 0;
+            padding: 0;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+          }
+          @media print {
+            body {
+              padding: 0;
+            }
+            .no-print {
+              display: none !important;
+            }
+          }
+        </style>
+      </head>
+      <body>
+        <div style="width: 100%; max-width: 100%; margin: 0; padding: 0;">
+          <!-- Top Scissor Guide before first strap -->
+          <div style="display: flex; align-items: center; margin-bottom: 3px; color: #000000;">
+            <span style="font-size: 16px; line-height: 1;">✂</span>
+            <span style="flex: 1; border-bottom: 2px dashed #000000; margin: 0 6px;"></span>
+            <span style="font-size: 16px; line-height: 1;">✂</span>
+          </div>
+
+          ${strapsHtml}
+        </div>
+      </body>
+    </html>
+  `;
+}
+
+/**
  * Builds the full standard A4 DRC document HTML
  */
 export function buildFullDrcDocumentHtml(receipt: ReceiptHeader): string {

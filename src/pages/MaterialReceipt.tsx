@@ -119,8 +119,10 @@ import {
 import { useSwipeOpenDrawer } from "../hooks/useSwipeTabs";
 import { usePersistentState } from "../hooks/usePersistentState";
 import { DrcFileStrapDialog } from "../components/DrcFileStrapDialog";
+import { BulkDrcStrapDialog } from "../components/BulkDrcStrapDialog";
 import {
   buildStrapPrintDocument,
+  buildBulkEdgeStrapPrintDocument,
   buildFullDrcDocumentHtml,
   executePrint,
 } from "../utils/drcPrintUtils";
@@ -1375,6 +1377,47 @@ export default function MaterialReceipt() {
     receipt: ReceiptHeader;
   } | null>(null);
 
+  // ---------------- Bulk DRC Edge Strap Selection & Print ----------------
+  const [selectedReceiptIds, setSelectedReceiptIds] = useState<number[]>([]);
+  const [bulkStrapDialogOpen, setBulkStrapDialogOpen] = useState(false);
+
+  function handleToggleSelectAll() {
+    if (filteredReceipts.length === 0) return;
+    const allFilteredSelected = filteredReceipts.every((r) =>
+      selectedReceiptIds.includes(r.id)
+    );
+    if (allFilteredSelected) {
+      const filteredIdSet = new Set(filteredReceipts.map((r) => r.id));
+      setSelectedReceiptIds((prev) => prev.filter((id) => !filteredIdSet.has(id)));
+    } else {
+      const newIds = Array.from(
+        new Set([...selectedReceiptIds, ...filteredReceipts.map((r) => r.id)])
+      );
+      setSelectedReceiptIds(newIds);
+    }
+  }
+
+  function handleToggleSelectReceipt(id: number) {
+    setSelectedReceiptIds((prev) =>
+      prev.includes(id) ? prev.filter((itemId) => itemId !== id) : [...prev, id]
+    );
+  }
+
+  function handleRemoveFromBulk(id: number) {
+    setSelectedReceiptIds((prev) => prev.filter((itemId) => itemId !== id));
+  }
+
+  function handleBulkDirectPrint() {
+    const selected = receipts.filter((r) => selectedReceiptIds.includes(r.id));
+    if (selected.length === 0) return;
+    const html = buildBulkEdgeStrapPrintDocument(selected);
+    executePrint(html, `DRC_Bulk_Edge_Straps_${selected.length}_items`);
+  }
+
+  function handleOpenBulkDialog() {
+    setBulkStrapDialogOpen(true);
+  }
+
   function handleOpenPrintMenu(e: MouseEvent<HTMLElement>, receipt: ReceiptHeader) {
     e.stopPropagation();
     setPrintMenuAnchor({ anchorEl: e.currentTarget, receipt });
@@ -1481,19 +1524,38 @@ export default function MaterialReceipt() {
           Material Receipt
         </Typography>
 
-        <Button
-          variant="contained"
-          startIcon={<AddIcon />}
-          onClick={openCreateForm}
-          sx={{
-            minHeight: 48,
-            borderRadius: 2.5,
-            fontWeight: 700,
-            width: { xs: "100%", sm: "auto" },
-          }}
-        >
-          Create DRC
-        </Button>
+        <Box sx={{ display: "flex", gap: 1, alignItems: "center", width: { xs: "100%", sm: "auto" } }}>
+          {selectedReceiptIds.length > 0 && (
+            <Button
+              variant="outlined"
+              color="primary"
+              startIcon={<ContentCutIcon />}
+              onClick={handleOpenBulkDialog}
+              sx={{
+                minHeight: 48,
+                borderRadius: 2.5,
+                fontWeight: 700,
+                flex: { xs: 1, sm: "none" },
+              }}
+            >
+              Bulk Straps ({selectedReceiptIds.length})
+            </Button>
+          )}
+          <Button
+            variant="contained"
+            startIcon={<AddIcon />}
+            onClick={openCreateForm}
+            sx={{
+              minHeight: 48,
+              borderRadius: 2.5,
+              fontWeight: 700,
+              width: { xs: selectedReceiptIds.length > 0 ? "auto" : "100%", sm: "auto" },
+              flex: { xs: 1, sm: "none" },
+            }}
+          >
+            Create DRC
+          </Button>
+        </Box>
       </Box>
 
       {/* ---- Summary cards ---- */}
@@ -1707,78 +1769,158 @@ export default function MaterialReceipt() {
         </Card>
       ) : (
         <>
+          {/* ---- Bulk Selection Action Banner ---- */}
+          {selectedReceiptIds.length > 0 && (
+            <Paper
+              elevation={2}
+              sx={{
+                p: 1.5,
+                px: 2,
+                mb: 1.5,
+                borderRadius: 2.5,
+                bgcolor: "primary.50",
+                border: "1px solid",
+                borderColor: "primary.200",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                flexWrap: "wrap",
+                gap: 1.25,
+                boxShadow: "0 2px 8px rgba(15,23,42,0.08)",
+              }}
+            >
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.25, flexWrap: "wrap" }}>
+                <Chip
+                  icon={<ContentCutIcon />}
+                  label={`${selectedReceiptIds.length} DRC${selectedReceiptIds.length > 1 ? "s" : ""} Selected`}
+                  color="primary"
+                  sx={{ fontWeight: 800, fontSize: "0.85rem" }}
+                />
+                <Typography variant="body2" sx={{ fontWeight: 600, color: "primary.900" }}>
+                  Ready for bulk edge strap printing (fits ~6 straps per single A4 page)
+                </Typography>
+              </Box>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                <Button
+                  variant="contained"
+                  size="small"
+                  startIcon={<PrintIcon />}
+                  onClick={handleBulkDirectPrint}
+                  sx={{ borderRadius: 2, fontWeight: 700, textTransform: "none", px: 2 }}
+                >
+                  Quick Print ({selectedReceiptIds.length})
+                </Button>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  startIcon={<VisibilityIcon />}
+                  onClick={handleOpenBulkDialog}
+                  sx={{
+                    borderRadius: 2,
+                    fontWeight: 700,
+                    textTransform: "none",
+                    bgcolor: "background.paper",
+                  }}
+                >
+                  Preview & Print
+                </Button>
+                <Button
+                  size="small"
+                  onClick={() => setSelectedReceiptIds([])}
+                  sx={{ textTransform: "none", color: "text.secondary", fontWeight: 600 }}
+                >
+                  Clear Selection
+                </Button>
+              </Box>
+            </Paper>
+          )}
+
           {/* ---- Mobile/tablet: card list ---- */}
           <Box sx={{ display: { xs: "flex", md: "none" }, flexDirection: "column", gap: 1 }}>
-            {filteredReceipts.map((r) => (
-              <Card
-                key={r.id}
-                variant="outlined"
-                onClick={() => setViewReceipt(r)}
-                sx={{
-                  borderRadius: 2.5,
-                  px: 1.5,
-                  py: 1.25,
-                  cursor: "pointer",
-                  transition: "background-color 0.15s ease",
-                  "&:hover": { bgcolor: "action.hover" },
-                }}
-              >
-                <Box sx={{ display: "flex", justifyContent: "space-between", gap: 1, alignItems: "flex-start" }}>
-                  <Box sx={{ minWidth: 0 }}>
-                    <Typography sx={{ fontWeight: 700, fontSize: "0.9rem" }} noWrap>
-                      {r.drc_number}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary" noWrap>
-                      {r.vendor_name}
-                    </Typography>
-                  </Box>
-                  <DrcStatusChip receipt={r} />
-                </Box>
-
-                <Grid container spacing={0.5} sx={{ mt: 0.5 }}>
-                  <Grid size={6}>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", fontSize: "0.65rem" }}>
-                      PO Number
-                    </Typography>
-                    <Typography variant="body2" noWrap>{r.po_number ?? "-"}</Typography>
-                  </Grid>
-                  <Grid size={6}>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", fontSize: "0.65rem" }}>
-                      Invoice Number
-                    </Typography>
-                    <Typography variant="body2" noWrap>{r.invoice_number ?? "-"}</Typography>
-                  </Grid>
-                  <Grid size={6}>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", fontSize: "0.65rem" }}>
-                      Receipt Date
-                    </Typography>
-                    <Typography variant="body2" noWrap>{formatDate(r.receipt_datetime)}</Typography>
-                  </Grid>
-                  <Grid size={6}>
-                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", fontSize: "0.65rem" }}>
-                      Vehicle Number
-                    </Typography>
-                    <Typography variant="body2" noWrap>{r.vehicle_number ?? "-"}</Typography>
-                  </Grid>
-                </Grid>
-
-                <Box
-                  sx={{ display: "flex", justifyContent: "flex-end", gap: 0.5, mt: 0.75 }}
-                  onClick={(e) => e.stopPropagation()}
+            {filteredReceipts.map((r) => {
+              const isSelected = selectedReceiptIds.includes(r.id);
+              return (
+                <Card
+                  key={r.id}
+                  variant="outlined"
+                  onClick={() => setViewReceipt(r)}
+                  sx={{
+                    borderRadius: 2.5,
+                    px: 1.5,
+                    py: 1.25,
+                    cursor: "pointer",
+                    transition: "background-color 0.15s ease",
+                    bgcolor: isSelected ? "rgba(25, 118, 210, 0.05)" : "background.paper",
+                    borderColor: isSelected ? "primary.main" : "divider",
+                    "&:hover": { bgcolor: "action.hover" },
+                  }}
                 >
-                  <Tooltip title="Print DRC & File Strap">
-                    <IconButton
-                      size="small"
-                      onClick={(e) => handleOpenPrintMenu(e, r)}
-                      aria-label="Print DRC & File Strap"
-                      sx={{ color: "primary.main" }}
-                    >
-                      <PrintIcon fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
-                </Box>
-              </Card>
-            ))}
+                  <Box sx={{ display: "flex", justifyContent: "space-between", gap: 1, alignItems: "flex-start" }}>
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 0.75, minWidth: 0 }}>
+                      <Checkbox
+                        size="small"
+                        checked={isSelected}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={() => handleToggleSelectReceipt(r.id)}
+                        sx={{ p: 0.25 }}
+                      />
+                      <Box sx={{ minWidth: 0 }}>
+                        <Typography sx={{ fontWeight: 700, fontSize: "0.9rem" }} noWrap>
+                          {r.drc_number}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" noWrap>
+                          {r.vendor_name}
+                        </Typography>
+                      </Box>
+                    </Box>
+                    <DrcStatusChip receipt={r} />
+                  </Box>
+
+                  <Grid container spacing={0.5} sx={{ mt: 0.5 }}>
+                    <Grid size={6}>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", fontSize: "0.65rem" }}>
+                        PO Number
+                      </Typography>
+                      <Typography variant="body2" noWrap>{r.po_number ?? "-"}</Typography>
+                    </Grid>
+                    <Grid size={6}>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", fontSize: "0.65rem" }}>
+                        Invoice Number
+                      </Typography>
+                      <Typography variant="body2" noWrap>{r.invoice_number ?? "-"}</Typography>
+                    </Grid>
+                    <Grid size={6}>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", fontSize: "0.65rem" }}>
+                        Receipt Date
+                      </Typography>
+                      <Typography variant="body2" noWrap>{formatDate(r.receipt_datetime)}</Typography>
+                    </Grid>
+                    <Grid size={6}>
+                      <Typography variant="caption" color="text.secondary" sx={{ display: "block", fontSize: "0.65rem" }}>
+                        Vehicle Number
+                      </Typography>
+                      <Typography variant="body2" noWrap>{r.vehicle_number ?? "-"}</Typography>
+                    </Grid>
+                  </Grid>
+
+                  <Box
+                    sx={{ display: "flex", justifyContent: "flex-end", gap: 0.5, mt: 0.75 }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Tooltip title="Print DRC & File Strap">
+                      <IconButton
+                        size="small"
+                        onClick={(e) => handleOpenPrintMenu(e, r)}
+                        aria-label="Print DRC & File Strap"
+                        sx={{ color: "primary.main" }}
+                      >
+                        <PrintIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </Box>
+                </Card>
+              );
+            })}
           </Box>
 
           {/* ---- Desktop: proper table ---- */}
@@ -1790,6 +1932,22 @@ export default function MaterialReceipt() {
             <Table sx={{ "& td, & th": { borderColor: "divider" } }}>
               <TableHead>
                 <TableRow sx={{ "& th": { bgcolor: "grey.50", fontWeight: 700, color: "text.secondary" } }}>
+                  <TableCell padding="checkbox">
+                    <Checkbox
+                      size="small"
+                      color="primary"
+                      indeterminate={
+                        selectedReceiptIds.length > 0 &&
+                        filteredReceipts.some((r) => selectedReceiptIds.includes(r.id)) &&
+                        !filteredReceipts.every((r) => selectedReceiptIds.includes(r.id))
+                      }
+                      checked={
+                        filteredReceipts.length > 0 &&
+                        filteredReceipts.every((r) => selectedReceiptIds.includes(r.id))
+                      }
+                      onChange={handleToggleSelectAll}
+                    />
+                  </TableCell>
                   <TableCell>DRC Number</TableCell>
                   <TableCell>Vendor</TableCell>
                   <TableCell>PO Number</TableCell>
@@ -1801,44 +1959,56 @@ export default function MaterialReceipt() {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {filteredReceipts.map((r) => (
-                  <TableRow
-                    key={r.id}
-                    hover
-                    onClick={() => setViewReceipt(r)}
-                    sx={{
-                      height: 60,
-                      cursor: "pointer",
-                      "&:hover": {
-                        bgcolor: "action.hover",
-                      },
-                    }}
-                  >
-                    <TableCell sx={{ fontWeight: 700 }}>{r.drc_number}</TableCell>
-                    <TableCell>{r.vendor_name}</TableCell>
-                    <TableCell>{r.po_number ?? "-"}</TableCell>
-                    <TableCell>{r.invoice_number ?? "-"}</TableCell>
-                    <TableCell>{r.vehicle_number ?? "-"}</TableCell>
-                    <TableCell>{formatDate(r.receipt_datetime)}</TableCell>
-                    <TableCell>
-                      <DrcStatusChip receipt={r} />
-                    </TableCell>
-                    <TableCell align="right" onClick={(e) => e.stopPropagation()}>
-                      <Box sx={{ display: "flex", justifyContent: "flex-end" }}>
-                        <Tooltip title="Print DRC & File Strap">
-                          <IconButton
-                            size="small"
-                            onClick={(e) => handleOpenPrintMenu(e, r)}
-                            aria-label="Print DRC & File Strap"
-                            sx={{ color: "primary.main" }}
-                          >
-                            <PrintIcon fontSize="small" />
-                          </IconButton>
-                        </Tooltip>
-                      </Box>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {filteredReceipts.map((r) => {
+                  const isSelected = selectedReceiptIds.includes(r.id);
+                  return (
+                    <TableRow
+                      key={r.id}
+                      hover
+                      selected={isSelected}
+                      onClick={() => setViewReceipt(r)}
+                      sx={{
+                        height: 60,
+                        cursor: "pointer",
+                        "&:hover": {
+                          bgcolor: "action.hover",
+                        },
+                      }}
+                    >
+                      <TableCell padding="checkbox" onClick={(e) => e.stopPropagation()}>
+                        <Checkbox
+                          size="small"
+                          color="primary"
+                          checked={isSelected}
+                          onChange={() => handleToggleSelectReceipt(r.id)}
+                        />
+                      </TableCell>
+                      <TableCell sx={{ fontWeight: 700 }}>{r.drc_number}</TableCell>
+                      <TableCell>{r.vendor_name}</TableCell>
+                      <TableCell>{r.po_number ?? "-"}</TableCell>
+                      <TableCell>{r.invoice_number ?? "-"}</TableCell>
+                      <TableCell>{r.vehicle_number ?? "-"}</TableCell>
+                      <TableCell>{formatDate(r.receipt_datetime)}</TableCell>
+                      <TableCell>
+                        <DrcStatusChip receipt={r} />
+                      </TableCell>
+                      <TableCell align="right" onClick={(e) => e.stopPropagation()}>
+                        <Box sx={{ display: "flex", justifyContent: "flex-end" }}>
+                          <Tooltip title="Print DRC & File Strap">
+                            <IconButton
+                              size="small"
+                              onClick={(e) => handleOpenPrintMenu(e, r)}
+                              aria-label="Print DRC & File Strap"
+                              sx={{ color: "primary.main" }}
+                            >
+                              <PrintIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        </Box>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </TableContainer>
@@ -2991,39 +3161,20 @@ export default function MaterialReceipt() {
               )}
             </DialogContent>
 
-            <DialogActions sx={{ p: 1.5, gap: 1, flexWrap: "wrap", justifyContent: "space-between" }}>
+            <DialogActions sx={{ p: 1.5, px: 2 }}>
               <Button
-                variant="outlined"
+                variant="contained"
                 startIcon={<EditIcon fontSize="small" />}
                 onClick={() => {
                   const r = viewReceipt;
                   setViewReceipt(null);
                   openEditForm(r);
                 }}
-                sx={{ minHeight: 44, borderRadius: 2 }}
+                fullWidth
+                sx={{ minHeight: 44, borderRadius: 2, fontWeight: 700 }}
               >
                 Edit
               </Button>
-
-              <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
-                <Button
-                  variant="outlined"
-                  startIcon={<DescriptionIcon fontSize="small" />}
-                  onClick={() => handleOpenStrapDialog(viewReceipt, "full")}
-                  sx={{ minHeight: 44, borderRadius: 2, fontWeight: 600 }}
-                >
-                  Full DRC
-                </Button>
-                <Button
-                  variant="contained"
-                  color="primary"
-                  startIcon={<ContentCutIcon fontSize="small" />}
-                  onClick={() => handleOpenStrapDialog(viewReceipt, "strap")}
-                  sx={{ minHeight: 44, borderRadius: 2, fontWeight: 700 }}
-                >
-                  Print File Strap
-                </Button>
-              </Box>
             </DialogActions>
           </>
         )}
@@ -3236,6 +3387,30 @@ export default function MaterialReceipt() {
             </Typography>
           </Box>
         </MenuItem>
+
+        <Divider sx={{ my: 0.5 }} />
+
+        <MenuItem
+          onClick={() => {
+            if (printMenuAnchor) {
+              handleToggleSelectReceipt(printMenuAnchor.receipt.id);
+              handleClosePrintMenu();
+            }
+          }}
+          sx={{ py: 1, gap: 1.5 }}
+        >
+          <ContentCutIcon fontSize="small" sx={{ color: "primary.main" }} />
+          <Box>
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+              {printMenuAnchor && selectedReceiptIds.includes(printMenuAnchor.receipt.id)
+                ? "Deselect from Bulk Straps"
+                : "Select for Bulk Strap Print"}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Combine onto single page to cut with scissors
+            </Typography>
+          </Box>
+        </MenuItem>
       </Menu>
 
       {/* DRC File Strap & Document Dialog */}
@@ -3244,6 +3419,18 @@ export default function MaterialReceipt() {
         receipt={strapDialogReceipt}
         onClose={() => setStrapDialogReceipt(null)}
         defaultTab={strapDialogTab}
+      />
+
+      {/* Bulk DRC Edge Strap Dialog */}
+      <BulkDrcStrapDialog
+        open={bulkStrapDialogOpen}
+        onClose={() => setBulkStrapDialogOpen(false)}
+        receipts={receipts.filter((r) => selectedReceiptIds.includes(r.id))}
+        onRemoveReceipt={handleRemoveFromBulk}
+        onClearAll={() => {
+          setSelectedReceiptIds([]);
+          setBulkStrapDialogOpen(false);
+        }}
       />
 
       <Snackbar
