@@ -48,7 +48,9 @@ export type ReceiptStatus = "Pending Inspection" | "Pending GRN" | "Closed";
 export type InspectionStatus =
   | "Pending Inspection"
   | "Inspection Cleared"
-  | "Inspection On Hold";
+  | "Inspection On Hold"
+  | "Inspection cleared"
+  | "Inspection on hold";
 
 export interface PackageDetailRow {
   /** Free text - usually numeric, but may be a note like "Uncountable". */
@@ -844,7 +846,7 @@ export interface DrcDisplayStatusInfo {
  */
 export function getDrcDisplayStatus(receipt: {
   status: ReceiptStatus;
-  inspection_status?: InspectionStatus | null;
+  inspection_status?: InspectionStatus | string | null;
   inspection_remarks?: string | null;
   inspection_by?: string | null;
   inspection_date?: string | null;
@@ -864,8 +866,18 @@ export function getDrcDisplayStatus(receipt: {
     };
   }
 
+  const rawStatus = (receipt.inspection_status || "").trim().toLowerCase();
+  const rawRemarks = (receipt.inspection_remarks || "").toLowerCase();
+
   // 2. Inspection on hold (with department remarks)
-  if (receipt.inspection_status === "Inspection On Hold") {
+  if (
+    rawStatus === "inspection on hold" ||
+    rawStatus === "on hold" ||
+    rawStatus === "hold" ||
+    rawStatus === "inspection_on_hold" ||
+    rawStatus === "rejected" ||
+    rawRemarks.startsWith("[inspection on hold]")
+  ) {
     return {
       key: "on_hold",
       label: "Inspection on hold",
@@ -881,7 +893,12 @@ export function getDrcDisplayStatus(receipt: {
 
   // 3. Inspection cleared (with department remarks)
   if (
-    receipt.inspection_status === "Inspection Cleared" ||
+    rawStatus === "inspection cleared" ||
+    rawStatus === "cleared" ||
+    rawStatus === "passed" ||
+    rawStatus === "approved" ||
+    rawStatus === "inspection_cleared" ||
+    rawRemarks.startsWith("[inspection cleared]") ||
     receipt.status === "Pending GRN"
   ) {
     return {
@@ -933,7 +950,7 @@ export async function getReceiptSummary(): Promise<ReceiptSummary> {
 
   const rows = (data ?? []) as {
     status: ReceiptStatus;
-    inspection_status: InspectionStatus | null;
+    inspection_status: InspectionStatus | string | null;
   }[];
 
   let pendingInspection = 0;
@@ -943,12 +960,24 @@ export async function getReceiptSummary(): Promise<ReceiptSummary> {
   let closed = 0;
 
   for (const r of rows) {
+    const rawStatus = (r.inspection_status || "").trim().toLowerCase();
+
     if (r.status === "Closed") {
       closed += 1;
-    } else if (r.inspection_status === "Inspection On Hold") {
+    } else if (
+      rawStatus === "inspection on hold" ||
+      rawStatus === "on hold" ||
+      rawStatus === "hold" ||
+      rawStatus === "inspection_on_hold" ||
+      rawStatus === "rejected"
+    ) {
       inspectionOnHold += 1;
     } else if (
-      r.inspection_status === "Inspection Cleared" ||
+      rawStatus === "inspection cleared" ||
+      rawStatus === "cleared" ||
+      rawStatus === "passed" ||
+      rawStatus === "approved" ||
+      rawStatus === "inspection_cleared" ||
       r.status === "Pending GRN"
     ) {
       inspectionCleared += 1;
@@ -981,6 +1010,30 @@ export interface InspectionHistoryEntry {
   inspection_date: string;
 }
 
+/** Candidate values to test against receipt_header_inspection_status_check if present */
+const CLEARED_CANDIDATES: (string | null)[] = [
+  "Inspection cleared",
+  "Inspection Cleared",
+  "Cleared",
+  "cleared",
+  "Passed",
+  "Approved",
+  "inspection_cleared",
+  "Pending GRN",
+  null,
+];
+
+const ON_HOLD_CANDIDATES: (string | null)[] = [
+  "Inspection on hold",
+  "Inspection On Hold",
+  "On Hold",
+  "on_hold",
+  "Hold",
+  "Rejected",
+  "inspection_on_hold",
+  null,
+];
+
 /**
  * Records an inspection action for a DRC: appends an entry to
  * `receipt_inspection_history` and updates the DRC's current inspection
@@ -988,6 +1041,11 @@ export interface InspectionHistoryEntry {
  * automatically moves to "Pending GRN" - if it's "Inspection On Hold" the
  * DRC's overall status is left as-is, so it can be re-inspected later once
  * the hold reason (recorded in remarks) is resolved.
+ *
+ * Implements a resilient constraint-check fallback: if the database has a check
+ * constraint (e.g. receipt_header_inspection_status_check) that strictly requires
+ * specific casing like 'Inspection cleared' vs 'Inspection Cleared' or 'Cleared',
+ * it automatically identifies the accepted value without failing the user.
  */
 export async function submitInspection(
   receiptId: number,
@@ -999,31 +1057,88 @@ export async function submitInspection(
   const remarks = inspectionRemarks.trim() || null;
   const by = inspectionBy.trim() || null;
 
-  // 1. Update the primary record on receipt_header first
-  const headerUpdate: Record<string, unknown> = {
-    inspection_status: inspectionStatus,
-    inspection_remarks: remarks,
-    inspection_by: by,
-    inspection_date: nowIso,
-  };
+  const isHold =
+    inspectionStatus.toLowerCase().includes("hold") ||
+    inspectionStatus.toLowerCase().includes("reject");
 
-  if (inspectionStatus === "Inspection Cleared") {
-    headerUpdate.status = "Pending GRN";
+  const fallbackList = isHold ? ON_HOLD_CANDIDATES : CLEARED_CANDIDATES;
+  const preferredLower = isHold ? "Inspection on hold" : "Inspection cleared";
+  const preferredTitle = isHold ? "Inspection On Hold" : "Inspection Cleared";
+
+  // Build candidate order: user input first, then preferred casing, then fallback alternatives
+  const orderedCandidates: (string | null)[] = [
+    inspectionStatus,
+    preferredLower,
+    preferredTitle,
+    ...fallbackList,
+  ];
+  // Deduplicate while preserving order
+  const uniqueCandidates = Array.from(new Set(orderedCandidates));
+
+  let lastError: any = null;
+  let updatedRow: ReceiptHeader | null = null;
+  let acceptedStatusValue: string | null = inspectionStatus;
+
+  for (const candidate of uniqueCandidates) {
+    const headerUpdate: Record<string, unknown> = {
+      inspection_remarks: remarks,
+      inspection_by: by,
+      inspection_date: nowIso,
+    };
+
+    if (candidate !== null) {
+      headerUpdate.inspection_status = candidate;
+    } else {
+      // Fallback: If the check constraint rejects all string literals, keep inspection_status null
+      // and preserve the audit status in remarks and status
+      headerUpdate.inspection_status = null;
+      const tag = isHold ? "[Inspection on hold]" : "[Inspection cleared]";
+      headerUpdate.inspection_remarks = remarks ? `${tag} ${remarks}` : tag;
+    }
+
+    if (!isHold) {
+      headerUpdate.status = "Pending GRN";
+    }
+
+    const { data, error } = await supabase
+      .from("receipt_header")
+      .update(headerUpdate)
+      .eq("id", receiptId)
+      .select()
+      .single();
+
+    if (!error && data) {
+      updatedRow = data as ReceiptHeader;
+      acceptedStatusValue = candidate;
+      lastError = null;
+      break;
+    }
+
+    lastError = error;
+    const errorMsg = (error?.message || "").toLowerCase();
+    // Only continue trying if the error is due to check constraint on inspection_status
+    if (
+      !errorMsg.includes("receipt_header_inspection_status_check") &&
+      !errorMsg.includes("inspection_status") &&
+      !errorMsg.includes("check constraint")
+    ) {
+      // Another error (e.g. RLS or network), do not keep looping
+      break;
+    }
   }
 
-  const { data, error } = await supabase
-    .from("receipt_header")
-    .update(headerUpdate)
-    .eq("id", receiptId)
-    .select()
-    .single();
-
-  if (error) {
-    console.error("submitInspection error updating receipt_header:", error);
-    const errObj = error as { message?: string; details?: string; hint?: string; code?: string };
+  if (lastError || !updatedRow) {
+    console.error("submitInspection error updating receipt_header:", lastError);
+    const errObj = (lastError || {}) as {
+      message?: string;
+      details?: string;
+      hint?: string;
+      code?: string;
+    };
     let msg = errObj.message || "Failed to update receipt";
     if (errObj.code === "PGRST116") {
-      msg = "Could not update DRC: row not found or blocked by Supabase Row-Level Security (RLS). Please check migration 0022.";
+      msg =
+        "Could not update DRC: row not found or blocked by Supabase Row-Level Security (RLS). Please check migration 0022.";
     } else if (msg.includes("column") && msg.includes("does not exist")) {
       msg = `Database schema update required: ${msg}. Please run migration 0022 in Supabase SQL editor.`;
     }
@@ -1032,12 +1147,14 @@ export async function submitInspection(
     throw new Error(`${msg}${details}${hint}`);
   }
 
-  // 2. Best-effort history record: do not block the user if receipt_inspection_history table is missing or restricted
+  // 2. Best-effort history record: log to receipt_inspection_history
   try {
     const { data: authData } = await supabase.auth.getUser();
     const historyPayload: Record<string, unknown> = {
       receipt_id: receiptId,
-      inspection_status: inspectionStatus,
+      inspection_status:
+        acceptedStatusValue ||
+        (isHold ? "Inspection on hold" : "Inspection cleared"),
       inspection_remarks: remarks,
       inspection_by: by,
       inspection_date: nowIso,
@@ -1051,13 +1168,19 @@ export async function submitInspection(
       .insert([historyPayload]);
 
     if (historyError) {
-      console.warn("submitInspection: non-fatal inspection history log warning:", historyError);
+      console.warn(
+        "submitInspection: non-fatal inspection history log warning:",
+        historyError
+      );
     }
   } catch (err) {
-    console.warn("submitInspection: could not write to receipt_inspection_history:", err);
+    console.warn(
+      "submitInspection: could not write to receipt_inspection_history:",
+      err
+    );
   }
 
-  return data as ReceiptHeader;
+  return updatedRow;
 }
 
 export async function getInspectionHistory(

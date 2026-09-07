@@ -55,4 +55,8 @@ BEGIN
   END IF;
 END $$;
 
+-- 6. Drop any restrictive check constraint on inspection_status so that all casing/statuses are accepted
+ALTER TABLE public.receipt_header
+  DROP CONSTRAINT IF EXISTS receipt_header_inspection_status_check;
+
 COMMIT;

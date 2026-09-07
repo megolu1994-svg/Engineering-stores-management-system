@@ -61,6 +61,7 @@ import PhotoCameraIcon from "@mui/icons-material/PhotoCamera";
 import PhotoLibraryIcon from "@mui/icons-material/PhotoLibrary";
 import AttachFileIcon from "@mui/icons-material/AttachFile";
 import DescriptionIcon from "@mui/icons-material/Description";
+import ContentCutIcon from "@mui/icons-material/ContentCut";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import TaskAltOutlinedIcon from "@mui/icons-material/TaskAltOutlined";
@@ -117,6 +118,12 @@ import {
 } from "../services/receiptService";
 import { useSwipeOpenDrawer } from "../hooks/useSwipeTabs";
 import { usePersistentState } from "../hooks/usePersistentState";
+import { DrcFileStrapDialog } from "../components/DrcFileStrapDialog";
+import {
+  buildStrapPrintDocument,
+  buildFullDrcDocumentHtml,
+  executePrint,
+} from "../utils/drcPrintUtils";
 
 type SnackbarSeverity = "success" | "error" | "warning" | "info";
 
@@ -1127,10 +1134,9 @@ export default function MaterialReceipt() {
       return;
     }
 
+    const isAlreadyHold = (viewReceipt.inspection_status || "").toLowerCase().includes("hold");
     setInspectionStatusInput(
-      viewReceipt.inspection_status === "Inspection On Hold"
-        ? "Inspection On Hold"
-        : "Inspection Cleared"
+      isAlreadyHold ? "Inspection on hold" : "Inspection cleared"
     );
     setInspectionRemarksInput(viewReceipt.inspection_remarks || "");
     setInspectionByInput(viewReceipt.inspection_by || "");
@@ -1155,10 +1161,9 @@ export default function MaterialReceipt() {
   async function handleSubmitInspection() {
     if (!viewReceipt) return;
 
-    if (
-      inspectionStatusInput === "Inspection On Hold" &&
-      !inspectionRemarksInput.trim()
-    ) {
+    const isHoldAction = inspectionStatusInput.toLowerCase().includes("hold");
+
+    if (isHoldAction && !inspectionRemarksInput.trim()) {
       showSnackbar(
         "Please enter remarks explaining why inspection is on hold.",
         "warning"
@@ -1197,7 +1202,7 @@ export default function MaterialReceipt() {
 
       // An on-hold outcome needs the relevant team notified with the hold
       // reason so the DRC can be moved forward once it's resolved.
-      if (inspectionStatusInput === "Inspection On Hold") {
+      if (isHoldAction) {
         openMailDialog(updated, "Inspection On Hold");
       }
     } catch (err: unknown) {
@@ -1362,81 +1367,43 @@ export default function MaterialReceipt() {
     }
   }
 
-  // ---------------- Print DRC ----------------
-  function handlePrint(receipt: ReceiptHeader) {
-    const printWindow = window.open("", "_blank", "width=700,height=900");
-    if (!printWindow) return;
+  // ---------------- Print DRC & File Strap ----------------
+  const [strapDialogReceipt, setStrapDialogReceipt] = useState<ReceiptHeader | null>(null);
+  const [strapDialogTab, setStrapDialogTab] = useState<"strap" | "full">("strap");
+  const [printMenuAnchor, setPrintMenuAnchor] = useState<{
+    anchorEl: HTMLElement;
+    receipt: ReceiptHeader;
+  } | null>(null);
 
-    const statusInfo = getDrcDisplayStatus(receipt);
+  function handleOpenPrintMenu(e: MouseEvent<HTMLElement>, receipt: ReceiptHeader) {
+    e.stopPropagation();
+    setPrintMenuAnchor({ anchorEl: e.currentTarget, receipt });
+  }
 
-    const packageSummary =
-      receipt.package_details && receipt.package_details.length > 0
-        ? receipt.package_details
-            .map((p) => `${p.quantity} x ${p.package_type}${p.description ? ` (${p.description})` : ""}`)
-            .join("; ")
-        : receipt.package_count && receipt.package_type
-        ? `${receipt.package_count} x ${receipt.package_type}`
-        : "-";
+  function handleClosePrintMenu() {
+    setPrintMenuAnchor(null);
+  }
 
-    const rows: [string, string][] = [
-      ["DRC Number", receipt.drc_number],
-      ["Status", statusInfo.label],
-      ["Inspection Remarks", receipt.inspection_remarks ?? "-"],
-      ["Inspected By", receipt.inspection_by ?? "-"],
-      ["Inspection Date", receipt.inspection_date ? formatDateTime(receipt.inspection_date) : "-"],
-      ["Receipt Date/Time", formatDateTime(receipt.receipt_datetime)],
-      ["Receipt Mode", receipt.receipt_mode],
-      ["Vehicle Number", receipt.vehicle_number ?? "-"],
-      ["Package Details", packageSummary],
-      ["Vendor Name", receipt.vendor_name],
-      ["SAP PO Number", receipt.sap_po_number ?? "-"],
-      ["SAP PO Date", formatDate(receipt.sap_po_date)],
-      ["GeM Order Number", receipt.gem_order_number ?? "-"],
-      ["GeM Order Date", formatDate(receipt.gem_order_date)],
-      ["Invoice Number", receipt.invoice_number ?? "-"],
-      ["Invoice Date", formatDate(receipt.invoice_date)],
-      ["Challan Number", receipt.challan_number ?? "-"],
-      ["Challan Date", formatDate(receipt.challan_date)],
-      ["E-Way Bill Number", receipt.eway_bill_number ?? "-"],
-      ["E-Way Bill Date", formatDate(receipt.eway_bill_date)],
-      ["Lorry Receipt Number", receipt.lorry_receipt_number ?? "-"],
-      ["Lorry Receipt Date", formatDate(receipt.lorry_receipt_date)],
-      ["Weightment Slip Number", receipt.weightment_slip_number ?? "-"],
-      ["Gross Weight", receipt.gross_weight !== null ? String(receipt.gross_weight) : "-"],
-      ["Tare Weight", receipt.tare_weight !== null ? String(receipt.tare_weight) : "-"],
-      ["Net Weight", receipt.net_weight !== null ? String(receipt.net_weight) : "-"],
-      ["Purpose", receipt.purpose ?? receipt.remarks ?? "-"],
-      [receipt.receipt_mode === "Vehicle" ? "Driver Name" : "Person Name", receipt.driver_name ?? "-"],
-      ["Tax Invoice Value", receipt.tax_invoice_value !== null ? String(receipt.tax_invoice_value) : "-"],
-      ["MSME / Non MSME", receipt.msme_type ?? "-"],
-      ["Location", receipt.delivery_location ?? "-"],
-      ["Important Note", receipt.important_note ?? "-"],
-      ["VIM Approval", receipt.vim_approval ?? "-"],
-    ];
+  function handleOpenStrapDialog(receipt: ReceiptHeader, tab: "strap" | "full" = "strap") {
+    setStrapDialogReceipt(receipt);
+    setStrapDialogTab(tab);
+    handleClosePrintMenu();
+  }
 
-    const rowsHtml = rows
-      .map(
-        ([label, value]) =>
-          `<tr><td style="padding:6px 10px;font-weight:600;border:1px solid #ddd;word-break:break-word;">${label}</td><td style="padding:6px 10px;border:1px solid #ddd;word-break:break-word;">${value}</td></tr>`
-      )
-      .join("");
+  function handleDirectPrintStrap(receipt: ReceiptHeader) {
+    handleClosePrintMenu();
+    const strapHtml = buildStrapPrintDocument(receipt, {
+      format: "horizontal_edge_strap",
+      stripCount: 1,
+      edgeFontSize: "large",
+    });
+    executePrint(strapHtml, `DRC_Edge_Strap_${receipt.drc_number}`);
+  }
 
-    printWindow.document.write(`
-      <html>
-        <head>
-          <title>${receipt.drc_number}</title>
-          <meta name="viewport" content="width=device-width, initial-scale=1" />
-        </head>
-        <body style="font-family: Arial, sans-serif; padding: 24px;">
-          <h2 style="margin-bottom: 4px;">Delivery Receipt Challan</h2>
-          <p style="margin-top: 0; color: #555;">${receipt.drc_number}</p>
-          <table style="border-collapse: collapse; width: 100%; table-layout: fixed;">${rowsHtml}</table>
-        </body>
-      </html>
-    `);
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.print();
+  function handleDirectPrintFull(receipt: ReceiptHeader) {
+    handleClosePrintMenu();
+    const fullHtml = buildFullDrcDocumentHtml(receipt);
+    executePrint(fullHtml, `DRC_${receipt.drc_number}`);
   }
 
   // ---------------- Summary cards ----------------
@@ -1799,16 +1766,16 @@ export default function MaterialReceipt() {
                   sx={{ display: "flex", justifyContent: "flex-end", gap: 0.5, mt: 0.75 }}
                   onClick={(e) => e.stopPropagation()}
                 >
-                  <IconButton
-                    size="small"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handlePrint(r);
-                    }}
-                    aria-label="Print DRC"
-                  >
-                    <PrintIcon fontSize="small" />
-                  </IconButton>
+                  <Tooltip title="Print DRC & File Strap">
+                    <IconButton
+                      size="small"
+                      onClick={(e) => handleOpenPrintMenu(e, r)}
+                      aria-label="Print DRC & File Strap"
+                      sx={{ color: "primary.main" }}
+                    >
+                      <PrintIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
                 </Box>
               </Card>
             ))}
@@ -1858,16 +1825,16 @@ export default function MaterialReceipt() {
                     </TableCell>
                     <TableCell align="right" onClick={(e) => e.stopPropagation()}>
                       <Box sx={{ display: "flex", justifyContent: "flex-end" }}>
-                        <IconButton
-                          size="small"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handlePrint(r);
-                          }}
-                          aria-label="Print DRC"
-                        >
-                          <PrintIcon fontSize="small" />
-                        </IconButton>
+                        <Tooltip title="Print DRC & File Strap">
+                          <IconButton
+                            size="small"
+                            onClick={(e) => handleOpenPrintMenu(e, r)}
+                            aria-label="Print DRC & File Strap"
+                            sx={{ color: "primary.main" }}
+                          >
+                            <PrintIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
                       </Box>
                     </TableCell>
                   </TableRow>
@@ -2298,11 +2265,11 @@ export default function MaterialReceipt() {
 
               {viewReceipt.inspection_remarks && (
                 <Alert
-                  severity={viewReceipt.inspection_status === "Inspection On Hold" ? "error" : "success"}
+                  severity={getDrcDisplayStatus(viewReceipt).key === "on_hold" ? "error" : "success"}
                   sx={{ mb: 1.5, borderRadius: 2 }}
                 >
                   <Typography variant="caption" sx={{ fontWeight: 700, display: "block" }}>
-                    Department Inspection Comments ({viewReceipt.inspection_status}):
+                    Department Inspection Comments ({getDrcDisplayStatus(viewReceipt).label}):
                   </Typography>
                   <Typography variant="body2">{viewReceipt.inspection_remarks}</Typography>
                 </Alert>
@@ -2524,7 +2491,7 @@ export default function MaterialReceipt() {
                     Generate Inspection Mail
                   </Button>
 
-                  {viewReceipt.inspection_status === "Inspection On Hold" && (
+                  {getDrcDisplayStatus(viewReceipt).key === "on_hold" && (
                     <Button
                       variant="outlined"
                       color="warning"
@@ -2542,28 +2509,28 @@ export default function MaterialReceipt() {
                   <Box sx={{ display: "flex", gap: 1 }}>
                     <Button
                       variant={
-                        inspectionStatusInput === "Inspection Cleared"
+                        inspectionStatusInput.toLowerCase().includes("clear")
                           ? "contained"
                           : "outlined"
                       }
                       color="success"
                       fullWidth
                       startIcon={<TaskAltOutlinedIcon fontSize="small" />}
-                      onClick={() => setInspectionStatusInput("Inspection Cleared")}
+                      onClick={() => setInspectionStatusInput("Inspection cleared")}
                       sx={{ minHeight: 44, borderRadius: 2, fontWeight: 700 }}
                     >
                       Inspection Cleared
                     </Button>
                     <Button
                       variant={
-                        inspectionStatusInput === "Inspection On Hold"
+                        inspectionStatusInput.toLowerCase().includes("hold")
                           ? "contained"
                           : "outlined"
                       }
                       color="error"
                       fullWidth
                       startIcon={<ReportProblemIcon fontSize="small" />}
-                      onClick={() => setInspectionStatusInput("Inspection On Hold")}
+                      onClick={() => setInspectionStatusInput("Inspection on hold")}
                       sx={{ minHeight: 44, borderRadius: 2, fontWeight: 700 }}
                     >
                       Inspection On Hold
@@ -2572,7 +2539,7 @@ export default function MaterialReceipt() {
 
                   <TextField
                     label={
-                      inspectionStatusInput === "Inspection On Hold"
+                      inspectionStatusInput.toLowerCase().includes("hold")
                         ? "Remarks - reason for hold"
                         : "Remarks (optional)"
                     }
@@ -2580,7 +2547,7 @@ export default function MaterialReceipt() {
                     fullWidth
                     multiline
                     minRows={2}
-                    required={inspectionStatusInput === "Inspection On Hold"}
+                    required={inspectionStatusInput.toLowerCase().includes("hold")}
                     value={inspectionRemarksInput}
                     onChange={(e) => setInspectionRemarksInput(e.target.value)}
                     sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }}
@@ -2619,7 +2586,7 @@ export default function MaterialReceipt() {
                       Status
                     </Typography>
                     <Typography variant="body2" sx={{ fontWeight: 600, minWidth: 0, wordBreak: "break-word" }}>
-                      {viewReceipt.inspection_status ?? "-"}
+                      {getDrcDisplayStatus(viewReceipt).label}
                     </Typography>
                   </Box>
                   <Box sx={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 1 }}>
@@ -2932,7 +2899,17 @@ export default function MaterialReceipt() {
                       <Box sx={{ display: "flex", justifyContent: "space-between" }}>
                         <Chip
                           size="small"
-                          label={h.inspection_status}
+                          label={
+                            (h.inspection_status || "").toLowerCase().includes("hold")
+                              ? "Inspection on hold"
+                              : "Inspection cleared"
+                          }
+                          color={
+                            (h.inspection_status || "").toLowerCase().includes("hold")
+                              ? "error"
+                              : "success"
+                          }
+                          variant="outlined"
                           sx={{ fontWeight: 600 }}
                         />
                         <Typography variant="caption" color="text.secondary">
@@ -3014,7 +2991,7 @@ export default function MaterialReceipt() {
               )}
             </DialogContent>
 
-            <DialogActions sx={{ p: 1.5 }}>
+            <DialogActions sx={{ p: 1.5, gap: 1, flexWrap: "wrap", justifyContent: "space-between" }}>
               <Button
                 variant="outlined"
                 startIcon={<EditIcon fontSize="small" />}
@@ -3027,14 +3004,26 @@ export default function MaterialReceipt() {
               >
                 Edit
               </Button>
-              <Button
-                variant="contained"
-                startIcon={<PrintIcon fontSize="small" />}
-                onClick={() => handlePrint(viewReceipt)}
-                sx={{ minHeight: 44, borderRadius: 2 }}
-              >
-                Print
-              </Button>
+
+              <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                <Button
+                  variant="outlined"
+                  startIcon={<DescriptionIcon fontSize="small" />}
+                  onClick={() => handleOpenStrapDialog(viewReceipt, "full")}
+                  sx={{ minHeight: 44, borderRadius: 2, fontWeight: 600 }}
+                >
+                  Full DRC
+                </Button>
+                <Button
+                  variant="contained"
+                  color="primary"
+                  startIcon={<ContentCutIcon fontSize="small" />}
+                  onClick={() => handleOpenStrapDialog(viewReceipt, "strap")}
+                  sx={{ minHeight: 44, borderRadius: 2, fontWeight: 700 }}
+                >
+                  Print File Strap
+                </Button>
+              </Box>
             </DialogActions>
           </>
         )}
@@ -3150,6 +3139,112 @@ export default function MaterialReceipt() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Print Options Dropdown Menu */}
+      <Menu
+        anchorEl={printMenuAnchor?.anchorEl}
+        open={Boolean(printMenuAnchor)}
+        onClose={handleClosePrintMenu}
+        transformOrigin={{ horizontal: "right", vertical: "top" }}
+        anchorOrigin={{ horizontal: "right", vertical: "bottom" }}
+        slotProps={{
+          paper: {
+            sx: {
+              borderRadius: 2.5,
+              boxShadow: "0 10px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.1)",
+              minWidth: 270,
+              py: 0.5,
+            },
+          },
+        }}
+      >
+        <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: "divider" }}>
+          <Typography variant="caption" sx={{ fontWeight: 800, textTransform: "uppercase", color: "text.secondary" }}>
+            Print DRC Options
+          </Typography>
+          <Typography variant="body2" sx={{ fontWeight: 800, fontFamily: "monospace", color: "text.primary" }}>
+            {printMenuAnchor?.receipt.drc_number}
+          </Typography>
+        </Box>
+
+        <MenuItem
+          onClick={() => {
+            if (printMenuAnchor) handleOpenStrapDialog(printMenuAnchor.receipt, "strap");
+          }}
+          sx={{ py: 1.25, gap: 1.5 }}
+        >
+          <ContentCutIcon fontSize="small" color="primary" />
+          <Box>
+            <Typography variant="body2" sx={{ fontWeight: 700 }}>
+              Print File Edge Strap (DRC • PO • Vendor)...
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Single horizontal line strap to identify & retrieve stacked files
+            </Typography>
+          </Box>
+        </MenuItem>
+
+        <MenuItem
+          onClick={() => {
+            if (printMenuAnchor) handleDirectPrintStrap(printMenuAnchor.receipt);
+          }}
+          sx={{ py: 1, gap: 1.5 }}
+        >
+          <PrintIcon fontSize="small" sx={{ color: "success.main" }} />
+          <Box>
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+              Quick Print Edge Strap (1 Strip)
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Direct 1-click single line strap (paper-saving)
+            </Typography>
+          </Box>
+        </MenuItem>
+
+        <Divider sx={{ my: 0.5 }} />
+
+        <MenuItem
+          onClick={() => {
+            if (printMenuAnchor) handleOpenStrapDialog(printMenuAnchor.receipt, "full");
+          }}
+          sx={{ py: 1.25, gap: 1.5 }}
+        >
+          <DescriptionIcon fontSize="small" color="action" />
+          <Box>
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+              Full DRC Document (A4)...
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              View & print complete challan document
+            </Typography>
+          </Box>
+        </MenuItem>
+
+        <MenuItem
+          onClick={() => {
+            if (printMenuAnchor) handleDirectPrintFull(printMenuAnchor.receipt);
+          }}
+          sx={{ py: 1, gap: 1.5 }}
+        >
+          <PrintIcon fontSize="small" color="action" />
+          <Box>
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+              Quick Print Full DRC
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Direct 1-click full A4 sheet print
+            </Typography>
+          </Box>
+        </MenuItem>
+      </Menu>
+
+      {/* DRC File Strap & Document Dialog */}
+      <DrcFileStrapDialog
+        open={Boolean(strapDialogReceipt)}
+        receipt={strapDialogReceipt}
+        onClose={() => setStrapDialogReceipt(null)}
+        defaultTab={strapDialogTab}
+      />
 
       <Snackbar
         open={snackbar.open}
