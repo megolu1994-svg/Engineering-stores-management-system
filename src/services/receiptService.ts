@@ -873,20 +873,7 @@ export async function submitInspection(
   const remarks = inspectionRemarks.trim() || null;
   const by = inspectionBy.trim() || null;
 
-  const { error: historyError } = await supabase
-    .from("receipt_inspection_history")
-    .insert([
-      {
-        receipt_id: receiptId,
-        inspection_status: inspectionStatus,
-        inspection_remarks: remarks,
-        inspection_by: by,
-        inspection_date: nowIso,
-      },
-    ]);
-
-  if (historyError) throw historyError;
-
+  // 1. Update the primary record on receipt_header first
   const headerUpdate: Record<string, unknown> = {
     inspection_status: inspectionStatus,
     inspection_remarks: remarks,
@@ -905,7 +892,44 @@ export async function submitInspection(
     .select()
     .single();
 
-  if (error) throw error;
+  if (error) {
+    console.error("submitInspection error updating receipt_header:", error);
+    const errObj = error as { message?: string; details?: string; hint?: string; code?: string };
+    let msg = errObj.message || "Failed to update receipt";
+    if (errObj.code === "PGRST116") {
+      msg = "Could not update DRC: row not found or blocked by Supabase Row-Level Security (RLS). Please check migration 0022.";
+    } else if (msg.includes("column") && msg.includes("does not exist")) {
+      msg = `Database schema update required: ${msg}. Please run migration 0022 in Supabase SQL editor.`;
+    }
+    const details = errObj.details ? ` (${errObj.details})` : "";
+    const hint = errObj.hint ? ` Hint: ${errObj.hint}` : "";
+    throw new Error(`${msg}${details}${hint}`);
+  }
+
+  // 2. Best-effort history record: do not block the user if receipt_inspection_history table is missing or restricted
+  try {
+    const { data: authData } = await supabase.auth.getUser();
+    const historyPayload: Record<string, unknown> = {
+      receipt_id: receiptId,
+      inspection_status: inspectionStatus,
+      inspection_remarks: remarks,
+      inspection_by: by,
+      inspection_date: nowIso,
+    };
+    if (authData?.user?.id) {
+      historyPayload.user_id = authData.user.id;
+    }
+
+    const { error: historyError } = await supabase
+      .from("receipt_inspection_history")
+      .insert([historyPayload]);
+
+    if (historyError) {
+      console.warn("submitInspection: non-fatal inspection history log warning:", historyError);
+    }
+  } catch (err) {
+    console.warn("submitInspection: could not write to receipt_inspection_history:", err);
+  }
 
   return data as ReceiptHeader;
 }

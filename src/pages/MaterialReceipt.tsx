@@ -1087,8 +1087,14 @@ export default function MaterialReceipt() {
       if (inspectionStatusInput === "Inspection On Hold") {
         openMailDialog(updated, "Inspection On Hold");
       }
-    } catch {
-      showSnackbar("Something went wrong while saving the inspection.", "error");
+    } catch (err: unknown) {
+      console.error("Inspection submit error:", err);
+      const errObj = err as { message?: string; details?: string; hint?: string };
+      const msg =
+        errObj?.message ||
+        errObj?.details ||
+        "Something went wrong while saving the inspection.";
+      showSnackbar(msg, "error");
     } finally {
       setSubmittingInspection(false);
     }
