@@ -2385,6 +2385,110 @@ export async function rebalanceAppliedSingleBinSurplus(
 }
 
 /**
+ * Strategy 4 (Multi-Bin Extension): Automatically reconciles open multi-bin reviews
+ * with surplus (SAP stock > App stock) by routing the entire excess into UNALLOCATED.
+ * All existing physical shelf bins are kept 100% intact, protecting shelf inventory accuracy.
+ * Items with deficits (SAP stock < App stock) are skipped so the storekeeper can manually
+ * decide which physical bin to deduct from.
+ */
+export async function bulkAutoReconcileMultiBinSurplusReviews(
+  onProgress?: (done: number, total: number) => void
+): Promise<{
+  reconciledCount: number;
+  failedCount: number;
+  deficitCount: number;
+  totalSurplusAdded: number;
+}> {
+  const classifications = await classifyOpenReviews();
+  const multiBinSurplusItems = classifications.filter(
+    (c) => !c.isSingleLocation && c.review.sap_total > c.review.app_total
+  );
+  const multiBinDeficitItems = classifications.filter(
+    (c) => !c.isSingleLocation && c.review.sap_total < c.review.app_total
+  );
+
+  let reconciledCount = 0;
+  let failedCount = 0;
+  let totalSurplusAdded = 0;
+
+  for (let i = 0; i < multiBinSurplusItems.length; i++) {
+    const item = multiBinSurplusItems[i];
+    const { review, allBins } = item;
+    const diff = review.sap_total - review.app_total;
+
+    try {
+      const currentUnalloc =
+        allBins.find((b) => b.location_code === UNALLOCATED_LOCATION)?.quantity ?? 0;
+      const newUnalloc = currentUnalloc + diff;
+
+      await applySapReconciliation(
+        review.id,
+        review.material_code,
+        [
+          {
+            location_code: UNALLOCATED_LOCATION,
+            quantity: newUnalloc,
+          },
+        ],
+        `Auto-reconciled (Multi-Bin Surplus): +${diff} excess to UNALLOCATED (physical bins retained)`
+      );
+
+      reconciledCount++;
+      totalSurplusAdded += diff;
+    } catch (err) {
+      console.error(
+        `Failed to auto-reconcile multi-bin surplus for review ${review.id}:`,
+        err
+      );
+      failedCount++;
+    }
+    onProgress?.(i + 1, multiBinSurplusItems.length);
+  }
+
+  return {
+    reconciledCount,
+    failedCount,
+    deficitCount: multiBinDeficitItems.length,
+    totalSurplusAdded,
+  };
+}
+
+/**
+ * Automatically reconciles a single review with surplus (SAP > App) into UNALLOCATED,
+ * leaving all physical shelf bins untouched.
+ */
+export async function autoReconcileSurplusToUnallocated(
+  reviewId: number
+): Promise<void> {
+  const allReviews = await getSapReconciliationReviews();
+  const review = allReviews.find((r) => r.id === reviewId);
+  if (!review) throw new Error("Review not found");
+  if (review.sap_total <= review.app_total) {
+    throw new Error(
+      "This item does not have a surplus (SAP stock is not greater than App stock)."
+    );
+  }
+
+  const diff = review.sap_total - review.app_total;
+  const allocs = await getAllocations(review.material_code);
+  const currentUnalloc =
+    allocs.find((b) => b.location_code === UNALLOCATED_LOCATION)?.quantity ?? 0;
+  const newUnalloc = currentUnalloc + diff;
+
+  await applySapReconciliation(
+    review.id,
+    review.material_code,
+    [
+      {
+        location_code: UNALLOCATED_LOCATION,
+        quantity: newUnalloc,
+      },
+    ],
+    `Auto-reconciled surplus: +${diff} excess to UNALLOCATED (physical bins retained)`
+  );
+}
+
+/**
  * Bulk reconciles multi-bin reviews by setting the delta into UNALLOCATED,
  * leaving existing physical shelf bins intact.
  */

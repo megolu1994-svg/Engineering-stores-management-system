@@ -46,7 +46,8 @@ import {
 import {
   classifyOpenReviews,
   bulkAutoReconcileSingleBinReviews,
-  bulkReconcileMultiBinToUnallocated,
+  bulkAutoReconcileMultiBinSurplusReviews,
+  autoReconcileSurplusToUnallocated,
   getSapReconciliationReviews,
   getAppliedSingleBinReviews,
   revertAppliedSingleBinReviewsToOpen,
@@ -115,14 +116,15 @@ export default function AdjustmentTab() {
   const [classifications, setClassifications] = useState<
     Map<number, ReconciliationClassification>
   >(new Map());
-  const [filterType, setFilterType] = useState<"all" | "single" | "multi">(
-    "all"
-  );
+  const [filterType, setFilterType] = useState<
+    "all" | "single" | "multi" | "multi-surplus" | "multi-deficit"
+  >("all");
   const [bulkReconciling, setBulkReconciling] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{
     done: number;
     total: number;
   } | null>(null);
+  const [confirmMultiSurplusOpen, setConfirmMultiSurplusOpen] = useState(false);
 
   // Recovery & Revert state for previously applied single-bin auto-reconciliations
   const [appliedSingleBinReviews, setAppliedSingleBinReviews] = useState<
@@ -199,10 +201,33 @@ export default function AdjustmentTab() {
     ).length;
   }, [reviews, classifications]);
 
-  const multiBinCount = useMemo(() => {
-    if (!reviews) return 0;
-    return reviews.length - singleBinCount;
-  }, [reviews, singleBinCount]);
+  const multiBinReviews = useMemo(() => {
+    if (!reviews) return [];
+    return reviews.filter(
+      (r) =>
+        classifications.has(r.id) &&
+        !classifications.get(r.id)?.isSingleLocation
+    );
+  }, [reviews, classifications]);
+
+  const multiBinSurplusReviews = useMemo(() => {
+    return multiBinReviews.filter((r) => r.sap_total > r.app_total);
+  }, [multiBinReviews]);
+
+  const multiBinSurplusCount = multiBinSurplusReviews.length;
+
+  const multiBinDeficitReviews = useMemo(() => {
+    return multiBinReviews.filter((r) => r.sap_total < r.app_total);
+  }, [multiBinReviews]);
+
+  const multiBinDeficitCount = multiBinDeficitReviews.length;
+
+  const totalMultiBinSurplusQty = useMemo(() => {
+    return multiBinSurplusReviews.reduce(
+      (sum, r) => sum + Math.max(0, r.sap_total - r.app_total),
+      0
+    );
+  }, [multiBinSurplusReviews]);
 
   const filteredReviews = useMemo(() => {
     if (!reviews) return [];
@@ -212,14 +237,23 @@ export default function AdjustmentTab() {
       );
     }
     if (filterType === "multi") {
-      return reviews.filter(
-        (r) =>
-          classifications.has(r.id) &&
-          !classifications.get(r.id)?.isSingleLocation
-      );
+      return multiBinReviews;
+    }
+    if (filterType === "multi-surplus") {
+      return multiBinSurplusReviews;
+    }
+    if (filterType === "multi-deficit") {
+      return multiBinDeficitReviews;
     }
     return reviews;
-  }, [reviews, filterType, classifications]);
+  }, [
+    reviews,
+    filterType,
+    classifications,
+    multiBinReviews,
+    multiBinSurplusReviews,
+    multiBinDeficitReviews,
+  ]);
 
   const activeReviewIndex = useMemo(() => {
     if (!activeReview || !filteredReviews) return -1;
@@ -262,30 +296,48 @@ export default function AdjustmentTab() {
     }
   }
 
-  async function handleReconcileMultiToUnallocated() {
-    if (multiBinCount === 0) return;
+  async function handleAutoReconcileMultiBinSurplus() {
+    if (multiBinSurplusCount === 0) return;
+    setConfirmMultiSurplusOpen(false);
     setBulkReconciling(true);
-    setBulkProgress({ done: 0, total: multiBinCount });
+    setBulkProgress({ done: 0, total: multiBinSurplusCount });
     try {
-      const res = await bulkReconcileMultiBinToUnallocated(
-        undefined,
+      const res = await bulkAutoReconcileMultiBinSurplusReviews(
         (done, total) => {
           setBulkProgress({ done, total });
         }
       );
       showSnackbar(
-        `Reconciled ${res.reconciledCount} multi-bin material(s) into the Unallocated buffer.`,
+        `Auto-reconciled ${res.reconciledCount} multi-bin material(s)! +${res.totalSurplusAdded} excess stock deposited into UNALLOCATED. ${res.deficitCount} deficit item(s) remain for manual review.`,
         "success"
       );
       reloadReviews();
     } catch (err) {
       showSnackbar(
-        err instanceof Error ? err.message : "Multi-bin reconciliation failed.",
+        err instanceof Error
+          ? err.message
+          : "Multi-bin surplus auto-reconciliation failed.",
         "error"
       );
     } finally {
       setBulkReconciling(false);
       setBulkProgress(null);
+    }
+  }
+
+  async function handleQuickReconcileSurplus(reviewId: number) {
+    try {
+      await autoReconcileSurplusToUnallocated(reviewId);
+      showSnackbar(
+        "Excess stock successfully added to UNALLOCATED (physical bins preserved)!",
+        "success"
+      );
+      reloadReviews();
+    } catch (err) {
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to reconcile surplus.",
+        "error"
+      );
     }
   }
 
@@ -591,7 +643,7 @@ export default function AdjustmentTab() {
                         )
                       }
                       onClick={handleAutoReconcileSingleBin}
-                      disabled={bulkReconciling}
+                      disabled={bulkReconciling || actionBusy}
                       sx={{ borderRadius: 2, fontWeight: 700, textTransform: "none" }}
                     >
                       Auto-Reconcile Single-Bin ({singleBinCount})
@@ -599,19 +651,40 @@ export default function AdjustmentTab() {
                   </Tooltip>
                 )}
 
-                {multiBinCount > 0 && (
-                  <Tooltip title="Assigns the discrepancy for all multi-bin materials directly into the UNALLOCATED buffer, preserving current physical shelf quantities">
+                {multiBinSurplusCount > 0 && (
+                  <Tooltip title="Auto-reconciles multi-bin materials where SAP > App: credits the excess stock directly into UNALLOCATED, leaving all physical shelf bins untouched">
                     <Button
                       size="small"
-                      variant="outlined"
+                      variant="contained"
                       color="primary"
-                      startIcon={<BalanceIcon />}
-                      onClick={handleReconcileMultiToUnallocated}
-                      disabled={bulkReconciling}
+                      startIcon={
+                        bulkReconciling ? (
+                          <CircularProgress size={16} color="inherit" />
+                        ) : (
+                          <BalanceIcon />
+                        )
+                      }
+                      onClick={() => setConfirmMultiSurplusOpen(true)}
+                      disabled={bulkReconciling || actionBusy}
                       sx={{ borderRadius: 2, fontWeight: 700, textTransform: "none" }}
                     >
-                      Multi-Bin to Unallocated ({multiBinCount})
+                      Auto-Reconcile Multi-Bin Surplus ({multiBinSurplusCount})
                     </Button>
+                  </Tooltip>
+                )}
+
+                {multiBinDeficitCount > 0 && (
+                  <Tooltip title="Multi-bin materials where SAP < App: requires manual review so the storekeeper can decide which shelf bin had missing stock">
+                    <Chip
+                      icon={<WarningAmberIcon fontSize="small" />}
+                      label={`${multiBinDeficitCount} Deficit (Manual Review)`}
+                      size="small"
+                      color="warning"
+                      variant="outlined"
+                      clickable
+                      onClick={() => setFilterType("multi-deficit")}
+                      sx={{ fontWeight: 700, height: 32 }}
+                    />
                   </Tooltip>
                 )}
               </Box>
@@ -646,7 +719,7 @@ export default function AdjustmentTab() {
             )}
 
             {/* Filter chips */}
-            <Box sx={{ display: "flex", alignItems: "center", gap: 1, pt: 0.5 }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1, pt: 0.5, flexWrap: "wrap" }}>
               <Chip
                 label={`All (${reviews.length})`}
                 size="small"
@@ -668,12 +741,22 @@ export default function AdjustmentTab() {
               />
               <Chip
                 icon={<BalanceIcon fontSize="small" />}
-                label={`Multi-Bin Review (${multiBinCount})`}
+                label={`Multi-Bin Surplus (${multiBinSurplusCount})`}
                 size="small"
                 clickable
-                color={filterType === "multi" ? "primary" : "default"}
-                variant={filterType === "multi" ? "filled" : "outlined"}
-                onClick={() => setFilterType("multi")}
+                color={filterType === "multi-surplus" ? "primary" : "default"}
+                variant={filterType === "multi-surplus" ? "filled" : "outlined"}
+                onClick={() => setFilterType("multi-surplus")}
+                sx={{ fontWeight: 600 }}
+              />
+              <Chip
+                icon={<WarningAmberIcon fontSize="small" />}
+                label={`Multi-Bin Deficit / Manual (${multiBinDeficitCount})`}
+                size="small"
+                clickable
+                color={filterType === "multi-deficit" ? "warning" : "default"}
+                variant={filterType === "multi-deficit" ? "filled" : "outlined"}
+                onClick={() => setFilterType("multi-deficit")}
                 sx={{ fontWeight: 600 }}
               />
             </Box>
@@ -686,6 +769,7 @@ export default function AdjustmentTab() {
               const classification = classifications.get(review.id);
               const isSingle = classification?.isSingleLocation;
               const activeCount = classification?.activeBins.length ?? 0;
+              const isSurplus = diff > 0;
 
               return (
                 <Box
@@ -717,10 +801,18 @@ export default function AdjustmentTab() {
                             label={
                               isSingle
                                 ? "Single-Bin"
-                                : `Multi-Bin (${activeCount} bins)`
+                                : isSurplus
+                                ? `Multi-Bin Surplus (${activeCount} bins)`
+                                : `Multi-Bin Deficit (${activeCount} bins)`
                             }
                             size="small"
-                            color={isSingle ? "success" : "primary"}
+                            color={
+                              isSingle
+                                ? "success"
+                                : isSurplus
+                                ? "primary"
+                                : "warning"
+                            }
                             variant="outlined"
                             sx={{ height: 20, fontSize: "0.7rem", fontWeight: 700 }}
                           />
@@ -739,16 +831,38 @@ export default function AdjustmentTab() {
                         variant="body2"
                         sx={{
                           fontWeight: 800,
-                          color: diff > 0 ? "info.main" : "error.main",
+                          color: isSurplus ? "info.main" : "error.main",
                           whiteSpace: "nowrap",
                         }}
                       >
-                        {diff > 0 ? `App ${diff} below` : `App ${-diff} above`}
+                        {isSurplus ? `App ${diff} below (Surplus)` : `App ${-diff} above (Deficit)`}
                       </Typography>
+                      {isSurplus && !isSingle && (
+                        <Tooltip title="Immediately adds this item's surplus into UNALLOCATED, preserving all physical shelf bins">
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            color="primary"
+                            startIcon={<BalanceIcon fontSize="small" />}
+                            onClick={() => handleQuickReconcileSurplus(review.id)}
+                            disabled={bulkReconciling || actionBusy}
+                            sx={{
+                              borderRadius: 2,
+                              fontWeight: 700,
+                              textTransform: "none",
+                              fontSize: "0.75rem",
+                              py: 0.5,
+                            }}
+                          >
+                            +Unallocated
+                          </Button>
+                        </Tooltip>
+                      )}
                       <Button
                         size="small"
                         variant="contained"
                         onClick={() => setActiveReview(review)}
+                        disabled={bulkReconciling || actionBusy}
                         sx={{ borderRadius: 2, fontWeight: 700 }}
                       >
                         Review
@@ -914,6 +1028,65 @@ export default function AdjustmentTab() {
         reviewIndex={activeReviewIndex >= 0 ? activeReviewIndex : undefined}
         totalOpenReviews={filteredReviews.length}
       />
+
+      {/* Auto-Reconcile Multi-Bin Surplus Confirmation Dialog */}
+      <Dialog
+        open={confirmMultiSurplusOpen}
+        onClose={() => !bulkReconciling && setConfirmMultiSurplusOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ fontWeight: 800, display: "flex", alignItems: "center", gap: 1 }}>
+          <BalanceIcon color="primary" />
+          Auto-Reconcile Multi-Bin Surplus ({multiBinSurplusCount} items)?
+        </DialogTitle>
+        <DialogContent dividers>
+          <DialogContentText sx={{ mb: 1.5, color: "text.primary" }}>
+            This will automatically reconcile all multi-bin materials where SAP stock is higher than app stock:
+          </DialogContentText>
+          <Box component="ul" sx={{ pl: 2.5, m: 0, fontSize: "0.875rem", color: "text.secondary", display: "flex", flexDirection: "column", gap: 1 }}>
+            <li>
+              <strong>Physical shelf bins remain 100% untouched:</strong> Existing quantities across all physical shelf bins will be preserved exactly as counted.
+            </li>
+            <li>
+              <strong>Excess stock placed into UNALLOCATED:</strong> A total of <strong>+{totalMultiBinSurplusQty}</strong> surplus units will be deposited directly into the <code>UNALLOCATED</code> buffer.
+            </li>
+            <li>
+              <strong>Accounting aligned:</strong> Total stock in the app will match your SAP MB52 report immediately.
+            </li>
+            <li>
+              <strong>Deficits protected:</strong> The {multiBinDeficitCount} multi-bin deficit item(s) (where SAP &lt; App) are safely skipped and left open for manual review.
+            </li>
+          </Box>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button
+            onClick={() => setConfirmMultiSurplusOpen(false)}
+            disabled={bulkReconciling}
+            sx={{ fontWeight: 600 }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            color="primary"
+            startIcon={
+              bulkReconciling ? (
+                <CircularProgress size={16} color="inherit" />
+              ) : (
+                <BalanceIcon />
+              )
+            }
+            onClick={handleAutoReconcileMultiBinSurplus}
+            disabled={bulkReconciling}
+            sx={{ fontWeight: 700 }}
+          >
+            {bulkReconciling
+              ? "Reconciling..."
+              : `Confirm Auto-Reconcile (${multiBinSurplusCount})`}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Revert Single-Bin Reconciliation Confirmation Dialog */}
       <Dialog
