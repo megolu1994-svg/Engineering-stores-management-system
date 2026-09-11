@@ -924,16 +924,16 @@ export default function MaterialReceipt() {
         );
         showSnackbar(`DRC ${updated.drc_number} updated.`, "success");
       } else {
+        const finalDrcNumber = drcNumber.trim() || computedNextDrc || undefined;
+        const finalReceiptDatetime = combineDateWithNow(drcDate || todayIso());
         const created = await createReceipt(
           form,
           newPhotoFiles,
           newDocumentUploads,
-          manualDrcEntry
-            ? {
-                drc_number: drcNumber.trim(),
-                receipt_datetime: combineDateWithNow(drcDate),
-              }
-            : undefined
+          {
+            drc_number: finalDrcNumber,
+            receipt_datetime: finalReceiptDatetime,
+          }
         );
         showSnackbar(`DRC ${created.drc_number} created.`, "success");
         createdReceipt = created;
@@ -949,12 +949,14 @@ export default function MaterialReceipt() {
       }
     } catch (err) {
       const isDuplicateDrcNumber =
-        manualDrcEntry &&
         !editingReceipt &&
         typeof err === "object" &&
         err !== null &&
-        "code" in err &&
-        (err as { code?: string }).code === "23505";
+        (("code" in err && (err as { code?: string }).code === "23505") ||
+          ("message" in err &&
+            typeof (err as { message?: string }).message === "string" &&
+            ((err as { message: string }).message.includes("idx_receipt_header_drc_number") ||
+              (err as { message: string }).message.includes("duplicate key value"))));
 
       showSnackbar(
         isDuplicateDrcNumber

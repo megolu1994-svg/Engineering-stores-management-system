@@ -474,14 +474,6 @@ export interface DrcManualOverrides {
  *   – Falls back to DRC/{startYY}-{endYY}/1 if no row exists for the current FY.
  */
 export async function getNextDrcNumberSuggestion(): Promise<string> {
-  // Use the database RPC function to get the next DRC number.
-  const { data, error } = await supabase.rpc("generate_next_drc_number");
-
-  if (!error && data) {
-    return data as string;
-  }
-
-  // RPC failed (function may not exist yet) — query the DB directly.
   const now = new Date();
   const month = now.getMonth() + 1;
   const year = now.getFullYear();
@@ -489,13 +481,12 @@ export async function getNextDrcNumberSuggestion(): Promise<string> {
   const fyEnd = month >= 4 ? year + 1 : year;
   const prefix = `DRC/${String(fyStart).slice(-2)}-${String(fyEnd).slice(-2)}/`;
 
+  // 1. Direct query against receipt_header for the current FY
   try {
     const { data: rows, error: qErr } = await supabase
       .from("receipt_header")
       .select("drc_number")
-      .like("drc_number", "DRC/%")
-      .order("id", { ascending: false })
-      .limit(50);
+      .like("drc_number", `${prefix}%`);
 
     if (!qErr && rows && rows.length > 0) {
       let maxNum = 0;
@@ -506,28 +497,33 @@ export async function getNextDrcNumberSuggestion(): Promise<string> {
         const n = parseInt(numStr, 10);
         if (!isNaN(n) && n > maxNum) maxNum = n;
       }
-      return prefix + (maxNum + 1);
+      if (maxNum > 0) {
+        return prefix + (maxNum + 1);
+      }
     }
   } catch {
-    // ignore
+    // fallback
+  }
+
+  // 2. Fallback to RPC function
+  try {
+    const { data, error } = await supabase.rpc("generate_next_drc_number");
+    if (!error && data && typeof data === "string" && data.startsWith(prefix)) {
+      return data;
+    }
+  } catch {
+    // fallback
   }
 
   return prefix + "1";
 }
 
 /**
- * Creates a new DRC. drc_number, status, and receipt_datetime are left
- * unset on the insert so the database trigger generates them - this
- * insert path is unchanged from before and always runs first.
+ * Creates a new DRC.
  *
- * If `manualOverrides` is provided (operator switched on manual DRC No.
- * / Date entry), a follow-up update immediately applies the chosen
- * drc_number / receipt_datetime to the newly created row. Doing this as
- * a second update - rather than sending the overrides on the initial
- * insert - means the override never depends on how the database
- * trigger reacts to a pre-filled value: the trigger runs and fills its
- * defaults exactly as it always has, and the update then simply
- * replaces those columns like any other edit.
+ * `drc_number` and `receipt_datetime` from `manualOverrides` (or auto-computed)
+ * are included directly in the initial insert payload so that uniqueness and
+ * fields are established atomically in a single operation.
  */
 export async function createReceipt(
   input: ReceiptFormInput,
@@ -556,60 +552,38 @@ export async function createReceipt(
     attachment_paths: attachmentPaths,
   };
 
-  // ── DRC number generation ─────────────────────────────────────────
-  // We generate the number here in the app and verify uniqueness
-  // before inserting, so we never depend on the database trigger.
-  // Retry up to 5 times if a collision somehow occurs.
+  if (manualOverrides?.receipt_datetime) {
+    payload.receipt_datetime = manualOverrides.receipt_datetime;
+  }
+
+  // ── DRC number generation & collision handling ────────────────────
   const MAX_DRC_RETRIES = 5;
   let lastInsertError: unknown = null;
   let data: ReceiptHeader | null = null;
 
+  // Determine starting DRC candidate
+  let candidateDrc = manualOverrides?.drc_number?.trim();
+  if (!candidateDrc) {
+    candidateDrc = await getNextDrcNumberSuggestion();
+  }
+
   for (let attempt = 0; attempt < MAX_DRC_RETRIES; attempt++) {
-    // Generate or re-generate the DRC number for this attempt
-    if (attempt === 0 && manualOverrides?.drc_number) {
-      // First attempt with manual override — use the user-supplied number
-      payload.drc_number = manualOverrides.drc_number;
+    if (attempt === 0) {
+      payload.drc_number = candidateDrc;
     } else {
-      // Generate via RPC
-      try {
-        const { data: nextDrc, error: rpcError } = await supabase.rpc("generate_next_drc_number");
-        if (!rpcError && nextDrc) {
-          payload.drc_number = nextDrc as string;
-        } else {
-          // RPC failed — query the DB directly to find the next number
-          const fallback = await supabase
-            .from("receipt_header")
-            .select("drc_number")
-            .like("drc_number", "DRC/%")
-            .order("id", { ascending: false })
-            .limit(50);
-          if (!fallback.error && fallback.data) {
-            const now = new Date();
-            const month = now.getMonth() + 1;
-            const year = now.getFullYear();
-            const fyStart = month >= 4 ? year : year - 1;
-            const fyEnd = month >= 4 ? year + 1 : year;
-            const prefix = `DRC/${String(fyStart).slice(-2)}-${String(fyEnd).slice(-2)}/`;
-            let maxNum = 0;
-            for (const row of fallback.data) {
-              const dn = row.drc_number ?? "";
-              if (!dn.startsWith(prefix)) continue;
-              const numStr = dn.slice(prefix.length).replace(/[^0-9].*$/, "");
-              const n = parseInt(numStr, 10);
-              if (!isNaN(n) && n > maxNum) maxNum = n;
-            }
-            payload.drc_number = prefix + (maxNum + 1);
-          } else {
-            // Last resort
-            payload.drc_number = `DRC/26-27/${attempt + 100}`;
-          }
-        }
-      } catch {
-        payload.drc_number = `DRC/26-27/${attempt + 100}`;
+      // Collision retry: compute the next incremental number
+      const nextCandidate = await getNextDrcNumberSuggestion();
+      const prefixMatch = candidateDrc.match(/^(DRC\/\d{2}-\d{2}\/)(\d+)(.*)$/);
+      if (prefixMatch) {
+        const prefix = prefixMatch[1];
+        const num = parseInt(prefixMatch[2], 10);
+        const nextNum = Math.max(num + attempt, (parseInt(nextCandidate.replace(/[^0-9]/g, ""), 10) || 0) + attempt);
+        payload.drc_number = `${prefix}${nextNum}`;
+      } else {
+        payload.drc_number = nextCandidate;
       }
     }
 
-    // Attempt the insert
     lastInsertError = null;
     data = null;
 
@@ -622,12 +596,14 @@ export async function createReceipt(
     if (result.error) {
       lastInsertError = result.error;
       const rawMsg = (result.error as { message?: string })?.message ?? "";
-      const isDrcCollision = rawMsg.includes("idx_receipt_header_drc_number") || rawMsg.includes("duplicate key value violates unique constraint");
+      const isDrcCollision =
+        rawMsg.includes("idx_receipt_header_drc_number") ||
+        rawMsg.includes("duplicate key value violates unique constraint");
       if (isDrcCollision) {
         console.warn(`DRC collision on attempt ${attempt + 1} ("${payload.drc_number}"), retrying...`);
         continue; // retry with next number
       }
-      // Different error — stop retrying
+      // Non-collision error — stop retrying
       break;
     }
 
@@ -638,26 +614,18 @@ export async function createReceipt(
   if (lastInsertError || !data) {
     console.error("========== SUPABASE ERROR ==========");
     console.error(lastInsertError);
-    console.error("Payload:");
-    console.error(JSON.stringify(payload, null, 2));
-    const errObj = lastInsertError as { message?: string; details?: string; hint?: string };
-    const rawMsg = errObj?.message ?? "Unknown error";
-    alert(
-      "Failed to create DRC."
-      + "\n\nError: " + rawMsg
-      + (errObj?.details ? "\nDetails: " + errObj.details : "")
-      + (errObj?.hint ? "\nHint: " + errObj.hint : "")
-    );
+    console.error("Payload:", JSON.stringify(payload, null, 2));
     throw lastInsertError;
   }
 
   const created = data as ReceiptHeader;
 
+  // If receipt_datetime or drc_number differed from payload, apply final sync
   const overridePayload: Record<string, string> = {};
-  if (manualOverrides?.drc_number) {
+  if (manualOverrides?.drc_number && created.drc_number !== manualOverrides.drc_number) {
     overridePayload.drc_number = manualOverrides.drc_number;
   }
-  if (manualOverrides?.receipt_datetime) {
+  if (manualOverrides?.receipt_datetime && created.receipt_datetime !== manualOverrides.receipt_datetime) {
     overridePayload.receipt_datetime = manualOverrides.receipt_datetime;
   }
 
@@ -673,13 +641,6 @@ export async function createReceipt(
     .single();
 
   if (updateError) {
-    const msg = updateError.message ?? "";
-    if (msg.includes("idx_receipt_header_drc_number") ||
-        msg.includes("duplicate key value violates unique constraint")) {
-      alert(
-        "The DRC number you entered already exists.\nPlease choose a different DRC number."
-      );
-    }
     throw updateError;
   }
 
