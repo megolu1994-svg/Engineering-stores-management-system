@@ -4,18 +4,24 @@ import {
   Alert,
   Box,
   Button,
+  Chip,
   CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   TextField,
+  Tooltip,
   Typography,
   useMediaQuery,
   useTheme,
 } from "@mui/material";
 
 import HistoryIcon from "@mui/icons-material/History";
+import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh";
+import BalanceIcon from "@mui/icons-material/Balance";
+import RestartAltIcon from "@mui/icons-material/RestartAlt";
+import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 
 import { getAllocations } from "../services/materialAllocationService";
 import SapMaterialHistoryPopup from "./SapMaterialHistoryPopup";
@@ -39,6 +45,10 @@ interface Props {
   onClose: () => void;
   onResolved: () => void;
   onError: (message: string) => void;
+  onApplyAndNext?: () => void;
+  hasNextReview?: boolean;
+  reviewIndex?: number;
+  totalOpenReviews?: number;
 }
 
 /**
@@ -55,6 +65,10 @@ export default function SapReviewDialog({
   onClose,
   onResolved,
   onError,
+  onApplyAndNext,
+  hasNextReview,
+  reviewIndex,
+  totalOpenReviews,
 }: Props) {
   const theme = useTheme();
   const fullScreen = useMediaQuery(theme.breakpoints.down("sm"));
@@ -63,6 +77,7 @@ export default function SapReviewDialog({
   const [locations, setLocations] = useState<LocationRow[]>([]);
   const [remarks, setRemarks] = useState("");
   const [saving, setSaving] = useState(false);
+  const [savingAndNext, setSavingAndNext] = useState(false);
   const [dismissing, setDismissing] = useState(false);
 
   // Loading is derived from the id whose locations are in state, so the
@@ -126,11 +141,22 @@ export default function SapReviewDialog({
     [locations]
   );
 
-  const totalMatches = runningTotal === target;
+  const totalMatches = Math.abs(runningTotal - target) < 0.0001;
   const hasInvalidValue = locations.some((row) => {
     const value = Number(row.quantity);
     return row.quantity === "" || Number.isNaN(value) || value < 0;
   });
+
+  // Identify if this item is single-bin or multi-bin
+  const activePhysicalBins = useMemo(
+    () =>
+      locations.filter(
+        (r) => r.location_code !== UNALLOCATED_LOCATION && Number(r.original) > 0
+      ),
+    [locations]
+  );
+
+  const isMultiBin = activePhysicalBins.length > 1;
 
   function updateLocationQuantity(locationCode: string, value: string) {
     setLocations((prev) =>
@@ -140,36 +166,104 @@ export default function SapReviewDialog({
     );
   }
 
-  async function handleApply() {
+  /** Quick action: Assign the entire variance into UNALLOCATED */
+  function handlePutDeltaInUnallocated() {
+    setLocations((prev) => {
+      const unallocExists = prev.some(
+        (r) => r.location_code === UNALLOCATED_LOCATION
+      );
+      const list = [...prev];
+      if (!unallocExists) {
+        list.unshift({
+          location_code: UNALLOCATED_LOCATION,
+          original: 0,
+          quantity: "0",
+        });
+      }
+
+      // Sum of all other bins as currently set
+      const sumOtherBins = list
+        .filter((r) => r.location_code !== UNALLOCATED_LOCATION)
+        .reduce((sum, r) => sum + (Number(r.quantity) || 0), 0);
+
+      const targetUnalloc = Math.max(0, target - sumOtherBins);
+
+      return list.map((r) =>
+        r.location_code === UNALLOCATED_LOCATION
+          ? { ...r, quantity: String(targetUnalloc) }
+          : r
+      );
+    });
+  }
+
+  /** Quick action: Proportional distribution across existing non-zero bins */
+  function handleProportionalBalance() {
+    setLocations((prev) => {
+      const origSum = prev.reduce((s, r) => s + r.original, 0);
+      if (origSum <= 0) {
+        // Fallback: put everything into unallocated or first bin
+        return prev.map((r, i) => ({
+          ...r,
+          quantity: i === 0 ? String(target) : "0",
+        }));
+      }
+
+      let allocatedSoFar = 0;
+      const updated = prev.map((r, i) => {
+        if (i === prev.length - 1) {
+          // Last element gets remainder to guarantee exact match
+          const remainder = Math.max(0, Math.round((target - allocatedSoFar) * 100) / 100);
+          return { ...r, quantity: String(remainder) };
+        }
+        const proportion = r.original / origSum;
+        const binQty = Math.round(target * proportion * 100) / 100;
+        allocatedSoFar += binQty;
+        return { ...r, quantity: String(binQty) };
+      });
+
+      return updated;
+    });
+  }
+
+  /** Quick action: Reset all quantities to original */
+  function handleReset() {
+    setLocations((prev) =>
+      prev.map((r) => ({ ...r, quantity: String(r.original) }))
+    );
+  }
+
+  async function performApply() {
     if (!review || !totalMatches || hasInvalidValue) return;
 
+    const locationQuantities = locations
+      .filter((row) => Number(row.quantity) !== row.original)
+      .map((row) => ({
+        location_code: row.location_code,
+        quantity: Number(row.quantity),
+      }));
+
+    // If nothing changed in a bin, write the full locations state
+    const changed =
+      locationQuantities.length > 0
+        ? locationQuantities
+        : locations.map((row) => ({
+            location_code: row.location_code,
+            quantity: Number(row.quantity),
+          }));
+
+    await applySapReconciliation(
+      review.id,
+      review.material_code,
+      changed,
+      remarks ||
+        `SAP reconciliation (SAP ${review.sap_total} vs app ${review.app_total})`
+    );
+  }
+
+  async function handleApply() {
     setSaving(true);
-
     try {
-      const locationQuantities = locations
-        .filter((row) => Number(row.quantity) !== row.original)
-        .map((row) => ({
-          location_code: row.location_code,
-          quantity: Number(row.quantity),
-        }));
-
-      // If nothing changed in a bin, there's nothing to write for it.
-      const changed =
-        locationQuantities.length > 0
-          ? locationQuantities
-          : locations.map((row) => ({
-              location_code: row.location_code,
-              quantity: Number(row.quantity),
-            }));
-
-      await applySapReconciliation(
-        review.id,
-        review.material_code,
-        changed,
-        remarks ||
-          `SAP reconciliation (SAP ${review.sap_total} vs app ${review.app_total})`
-      );
-
+      await performApply();
       onResolved();
     } catch (err) {
       onError(
@@ -179,6 +273,26 @@ export default function SapReviewDialog({
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleApplyAndNext() {
+    setSavingAndNext(true);
+    try {
+      await performApply();
+      if (onApplyAndNext) {
+        onApplyAndNext();
+      } else {
+        onResolved();
+      }
+    } catch (err) {
+      onError(
+        err instanceof Error
+          ? err.message
+          : "Something went wrong while applying the reconciliation."
+      );
+    } finally {
+      setSavingAndNext(false);
     }
   }
 
@@ -192,7 +306,11 @@ export default function SapReviewDialog({
         review.id,
         remarks || "Dismissed by user."
       );
-      onResolved();
+      if (onApplyAndNext && hasNextReview) {
+        onApplyAndNext();
+      } else {
+        onResolved();
+      }
     } catch (err) {
       onError(
         err instanceof Error
@@ -211,168 +329,307 @@ export default function SapReviewDialog({
   const openSapHistory = () => {
     if (!review) return;
     if (fullScreen) {
-      // Mobile: open in a popup so the apply task is preserved.
       setSapHistoryOpen(true);
     } else {
-      // Desktop: open SAP History in a new browser tab.
-      window.open(`/sap-history?material=${review.material_code}`, "_blank", "noopener,noreferrer");
+      window.open(
+        `/sap-history?material=${review.material_code}`,
+        "_blank",
+        "noopener,noreferrer"
+      );
     }
   };
 
+  const isBusy = saving || savingAndNext || dismissing;
+
   return (
     <>
-    <Dialog
-      open={!!review}
-      onClose={saving || dismissing ? undefined : onClose}
-      fullWidth
-      maxWidth="xs"
-      fullScreen={fullScreen}
-    >
-      <DialogTitle
-        sx={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 1,
-          pr: 1.5,
-          py: 1.5,
-        }}
+      <Dialog
+        open={!!review}
+        onClose={isBusy ? undefined : onClose}
+        fullWidth
+        maxWidth="sm"
+        fullScreen={fullScreen}
       >
-        Apply SAP Reconciliation
-        <Button
-          variant="outlined"
-          size="small"
-          startIcon={<HistoryIcon />}
-          disabled={!review || saving || dismissing}
-          onClick={openSapHistory}
-          sx={{ borderRadius: 2, fontWeight: 600 }}
+        <DialogTitle
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 1,
+            pr: 1.5,
+            py: 1.5,
+          }}
         >
-          SAP History
-        </Button>
-      </DialogTitle>
-
-      <DialogContent>
-        {review && (
-          <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
-            <Typography variant="body2" color="text.secondary">
-              <strong>{review.material_code}</strong>
-              {review.short_description ? ` - ${review.short_description}` : ""}
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Typography variant="h6" sx={{ fontSize: "1.05rem", fontWeight: 700 }}>
+              Apply SAP Reconciliation
             </Typography>
+            {reviewIndex !== undefined && totalOpenReviews !== undefined && (
+              <Chip
+                label={`${reviewIndex + 1} of ${totalOpenReviews}`}
+                size="small"
+                variant="outlined"
+                sx={{ fontWeight: 700, fontSize: "0.75rem" }}
+              />
+            )}
+          </Box>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<HistoryIcon />}
+            disabled={!review || isBusy}
+            onClick={openSapHistory}
+            sx={{ borderRadius: 2, fontWeight: 600 }}
+          >
+            SAP History
+          </Button>
+        </DialogTitle>
 
-            <Alert severity="info" sx={{ py: 0.5 }}>
-              SAP total is {review.sap_total}, app stock is {review.app_total}{" "}
-              (difference {review.difference > 0 ? "+" : ""}
-              {review.difference}). The SAP split is for reference only -
-              choose which bin(s) the change comes from. The entered total
-              must equal the SAP total.
-            </Alert>
+        <DialogContent dividers sx={{ py: 2 }}>
+          {review && (
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 1.75 }}>
+              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 1 }}>
+                <Box>
+                  <Typography variant="body1" sx={{ fontWeight: 800 }}>
+                    {review.material_code}
+                  </Typography>
+                  {review.short_description && (
+                    <Typography variant="body2" color="text.secondary">
+                      {review.short_description}
+                    </Typography>
+                  )}
+                </Box>
+                <Chip
+                  icon={isMultiBin ? <BalanceIcon /> : <AutoFixHighIcon />}
+                  label={
+                    isMultiBin
+                      ? `Multi-Bin (${activePhysicalBins.length} locations)`
+                      : "Single-Location Item"
+                  }
+                  color={isMultiBin ? "primary" : "success"}
+                  size="small"
+                  variant="outlined"
+                  sx={{ fontWeight: 700 }}
+                />
+              </Box>
 
-            {breakdown.length > 0 && (
-              <Box
+              <Alert
+                severity="info"
                 sx={{
-                  px: 1.25,
                   py: 0.75,
-                  borderRadius: 2,
-                  bgcolor: "grey.50",
+                  fontSize: "0.85rem",
+                  "& .MuiAlert-message": { width: "100%" },
                 }}
               >
-                <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                  SAP storage locations (read-only):
-                </Typography>
-                <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                  {breakdown
-                    .map(
-                      (b) => `${b.storage_location}: ${b.quantity}`
-                    )
-                    .join("  ·  ")}
-                </Typography>
-              </Box>
-            )}
+                <Box sx={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 1 }}>
+                  <span>
+                    SAP total: <strong>{review.sap_total}</strong> · App total:{" "}
+                    <strong>{review.app_total}</strong>
+                  </span>
+                  <span style={{ fontWeight: 700 }}>
+                    Variance: {review.difference > 0 ? "+" : ""}
+                    {review.difference}
+                  </span>
+                </Box>
+              </Alert>
 
-            {loading ? (
-              <Box sx={{ display: "flex", justifyContent: "center", py: 3 }}>
-                <CircularProgress size={24} />
-              </Box>
-            ) : (
-              <>
-                {locations.map((row) => (
-                  <TextField
-                    key={row.location_code}
-                    label={row.location_code}
-                    type="number"
-                    size="small"
-                    fullWidth
-                    value={row.quantity}
-                    onChange={(e) =>
-                      updateLocationQuantity(row.location_code, e.target.value)
-                    }
-                    helperText={`Current: ${row.original}`}
-                    slotProps={{ htmlInput: { inputMode: "numeric", min: 0 } }}
-                    sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }}
-                  />
-                ))}
-
+              {breakdown.length > 0 && (
                 <Box
                   sx={{
-                    display: "flex",
-                    justifyContent: "space-between",
                     px: 1.25,
                     py: 0.75,
                     borderRadius: 2,
-                    bgcolor: totalMatches ? "success.50" : "grey.50",
+                    bgcolor: "grey.50",
+                    border: "1px solid",
+                    borderColor: "divider",
                   }}
                 >
-                  <Typography variant="caption" color="text.secondary">
-                    Entered Total
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                    SAP Storage Locations (Accounting reference):
                   </Typography>
-                  <Typography
-                    variant="body2"
-                    sx={{ fontWeight: 700 }}
-                    color={totalMatches ? "success.main" : "text.primary"}
-                  >
-                    {runningTotal} / {target}
+                  <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                    {breakdown
+                      .map((b) => `${b.storage_location}: ${b.quantity}`)
+                      .join("  ·  ")}
                   </Typography>
                 </Box>
+              )}
 
-                <TextField
-                  label="Remarks"
-                  placeholder="Optional - e.g. review notes"
-                  size="small"
-                  fullWidth
-                  multiline
-                  minRows={2}
-                  value={remarks}
-                  onChange={(e) => setRemarks(e.target.value)}
-                  sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }}
-                />
-              </>
+              {/* Quick Balancing Helper Toolbar */}
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, mr: 0.5 }}>
+                  Quick Balance:
+                </Typography>
+
+                <Tooltip title="Absorbs the discrepancy into the UNALLOCATED bucket without disturbing physical shelf bins">
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="secondary"
+                    startIcon={<AutoFixHighIcon />}
+                    onClick={handlePutDeltaInUnallocated}
+                    disabled={loading || isBusy}
+                    sx={{ textTransform: "none", borderRadius: 1.5, py: 0.25 }}
+                  >
+                    Delta to Unallocated
+                  </Button>
+                </Tooltip>
+
+                {isMultiBin && (
+                  <Tooltip title="Distributes the SAP total proportionally across all currently allocated bins">
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="primary"
+                      startIcon={<BalanceIcon />}
+                      onClick={handleProportionalBalance}
+                      disabled={loading || isBusy}
+                      sx={{ textTransform: "none", borderRadius: 1.5, py: 0.25 }}
+                    >
+                      Proportional
+                    </Button>
+                  </Tooltip>
+                )}
+
+                <Tooltip title="Reset quantities back to their original values">
+                  <Button
+                    size="small"
+                    variant="text"
+                    color="inherit"
+                    startIcon={<RestartAltIcon />}
+                    onClick={handleReset}
+                    disabled={loading || isBusy}
+                    sx={{ textTransform: "none", ml: "auto" }}
+                  >
+                    Reset
+                  </Button>
+                </Tooltip>
+              </Box>
+
+              {loading ? (
+                <Box sx={{ display: "flex", justifyContent: "center", py: 3 }}>
+                  <CircularProgress size={24} />
+                </Box>
+              ) : (
+                <>
+                  <Box sx={{ display: "flex", flexDirection: "column", gap: 1.25 }}>
+                    {locations.map((row) => (
+                      <TextField
+                        key={row.location_code}
+                        label={`${row.location_code}${
+                          row.location_code === UNALLOCATED_LOCATION
+                            ? " (Buffer / Unallocated)"
+                            : " (Physical Bin)"
+                        }`}
+                        type="number"
+                        size="small"
+                        fullWidth
+                        value={row.quantity}
+                        onChange={(e) =>
+                          updateLocationQuantity(row.location_code, e.target.value)
+                        }
+                        helperText={`Current Physical Stock: ${row.original}`}
+                        slotProps={{ htmlInput: { inputMode: "numeric", min: 0 } }}
+                        sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }}
+                      />
+                    ))}
+                  </Box>
+
+                  <Box
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      px: 1.5,
+                      py: 1,
+                      borderRadius: 2,
+                      bgcolor: totalMatches ? "success.50" : "error.50",
+                      border: "1px solid",
+                      borderColor: totalMatches ? "success.200" : "error.200",
+                    }}
+                  >
+                    <Typography
+                      variant="body2"
+                      sx={{ fontWeight: 600 }}
+                      color={totalMatches ? "success.dark" : "error.dark"}
+                    >
+                      {totalMatches
+                        ? "✓ Entered total matches SAP total"
+                        : "Entered total must match SAP total"}
+                    </Typography>
+                    <Typography
+                      variant="body1"
+                      sx={{ fontWeight: 800 }}
+                      color={totalMatches ? "success.dark" : "error.dark"}
+                    >
+                      {runningTotal} / {target}
+                    </Typography>
+                  </Box>
+
+                  <TextField
+                    label="Remarks"
+                    placeholder="Optional - e.g. review notes or physical count justification"
+                    size="small"
+                    fullWidth
+                    multiline
+                    minRows={2}
+                    value={remarks}
+                    onChange={(e) => setRemarks(e.target.value)}
+                    sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }}
+                  />
+                </>
+              )}
+            </Box>
+          )}
+        </DialogContent>
+
+        <DialogActions sx={{ p: 2, flexWrap: "wrap", gap: 1, justifyContent: "space-between" }}>
+          <Box sx={{ display: "flex", gap: 1 }}>
+            <Button
+              onClick={handleDismiss}
+              disabled={isBusy || loading}
+              color="inherit"
+              sx={{ minHeight: 40 }}
+            >
+              Dismiss
+            </Button>
+            <Button onClick={onClose} disabled={isBusy} sx={{ minHeight: 40 }}>
+              Cancel
+            </Button>
+          </Box>
+
+          <Box sx={{ display: "flex", gap: 1 }}>
+            <Button
+              variant="contained"
+              onClick={handleApply}
+              disabled={isBusy || loading || !totalMatches || hasInvalidValue}
+              startIcon={saving ? <CircularProgress size={16} color="inherit" /> : undefined}
+              sx={{ minHeight: 40, fontWeight: 700 }}
+            >
+              Apply
+            </Button>
+
+            {onApplyAndNext && hasNextReview && (
+              <Button
+                variant="contained"
+                color="success"
+                onClick={handleApplyAndNext}
+                disabled={isBusy || loading || !totalMatches || hasInvalidValue}
+                startIcon={
+                  savingAndNext ? (
+                    <CircularProgress size={16} color="inherit" />
+                  ) : (
+                    <ArrowForwardIcon />
+                  )
+                }
+                sx={{ minHeight: 40, fontWeight: 700 }}
+              >
+                Apply & Next
+              </Button>
             )}
           </Box>
-        )}
-      </DialogContent>
-
-      <DialogActions sx={{ p: 2, flexWrap: "wrap", gap: 1 }}>
-        <Button
-          onClick={handleDismiss}
-          disabled={saving || dismissing || loading}
-          sx={{ minHeight: 44 }}
-        >
-          Dismiss
-        </Button>
-        <Button onClick={onClose} disabled={saving || dismissing} sx={{ minHeight: 44 }}>
-          Cancel
-        </Button>
-        <Button
-          variant="contained"
-          onClick={handleApply}
-          disabled={saving || dismissing || loading || !totalMatches || hasInvalidValue}
-          startIcon={saving ? <CircularProgress size={18} color="inherit" /> : undefined}
-          sx={{ minHeight: 44 }}
-        >
-          Apply
-        </Button>
-      </DialogActions>
-    </Dialog>
+        </DialogActions>
+      </Dialog>
 
       {/* Mobile-only SAP History popup */}
       <SapMaterialHistoryPopup

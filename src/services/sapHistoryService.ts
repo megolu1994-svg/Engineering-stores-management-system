@@ -6,6 +6,7 @@ import { getMovementTypeDescription } from "../utils/sapMovementTypes";
 import {
   applyAdjustment,
   applyOpeningStock,
+  getAllocations,
 } from "./materialAllocationService";
 import { dismissPendingStockUpdate } from "./stockUpdateService";
 import { assertMaterialNotBlocked } from "./inventoryTransactionService";
@@ -1109,11 +1110,24 @@ export interface Mb52ImportSummary {
   materialsProcessed: number;
   matched: number;
   reviewsCreated: number;
+  /** Number of single-location materials automatically reconciled during import (Strategy 4). */
+  singleBinAutoReconciled?: number;
+  /** Number of multi-bin materials queued for manual review. */
+  multiBinReviewsQueued?: number;
   materialsCreated: number;
   /** Newly created materials whose quantity was posted to UNALLOCATED. */
   newMaterialsPosted: number;
   failed: number;
   outcomes: Mb52Outcome[];
+}
+
+export interface Mb52ImportOptions {
+  /**
+   * Strategy 4: If true (default), materials stored in a single bin or Unallocated
+   * are automatically adjusted to match SAP totals during MB52 import.
+   * Multi-bin materials are queued for review.
+   */
+  autoReconcileSingleBin?: boolean;
 }
 
 /**
@@ -1128,17 +1142,16 @@ export interface Mb52ImportSummary {
  *   - material not in Material Master -> created in the master and its
  *     full quantity posted to UNALLOCATED (opening stock), so new
  *     materials have their stock in the app without any manual step.
- *   - existing material, totals differ -> one open review (the SAP SLoc
- *     split stays as read-only reference; a person applies or dismisses
- *     it, one audited ADJUSTMENT per changed bin).
- *
- * Existing material_allocation rows are NEVER modified automatically -
- * the import only ever writes opening stock for brand-new materials.
+ *   - existing material, totals differ ->
+ *       - Single-bin / single-location material: automatically reconciled to
+ *         match SAP, review marked applied (Strategy 4).
+ *       - Multi-bin material: queued as open review for storekeeper review.
  */
 export async function bulkImportMb52(
   rows: SapDistributionRow[],
   fileName: string | undefined,
-  onProgress?: (processed: number, total: number) => void
+  onProgress?: (processed: number, total: number) => void,
+  options?: Mb52ImportOptions
 ): Promise<Mb52ImportSummary> {
   const summary: Mb52ImportSummary = {
     totalRows: rows.length,
@@ -1146,6 +1159,8 @@ export async function bulkImportMb52(
     materialsProcessed: 0,
     matched: 0,
     reviewsCreated: 0,
+    singleBinAutoReconciled: 0,
+    multiBinReviewsQueued: 0,
     materialsCreated: 0,
     newMaterialsPosted: 0,
     failed: 0,
@@ -1298,29 +1313,45 @@ export async function bulkImportMb52(
 
   reportProgress(0.5);
 
-  // 2. App physical totals per material (sum over all bins).
+  // 2. App physical totals and allocations per material.
   const appTotalMap = new Map<string, number>();
+  const allocationsMap = new Map<
+    string,
+    { location_code: string; quantity: number }[]
+  >();
+
   await runChunked(materialCodes, async (batch) => {
     const { data, error } = await supabase
       .from("material_allocation")
-      .select("material_code, quantity")
+      .select("material_code, location_code, quantity")
       .in("material_code", batch);
 
     if (error) throw error;
 
     (data ?? []).forEach(
-      (a: { material_code: string; quantity: number }) => {
+      (a: {
+        material_code: string;
+        location_code: string;
+        quantity: number;
+      }) => {
+        const qty = Number(a.quantity);
         appTotalMap.set(
           a.material_code,
-          (appTotalMap.get(a.material_code) ?? 0) + Number(a.quantity)
+          (appTotalMap.get(a.material_code) ?? 0) + qty
         );
+        let list = allocationsMap.get(a.material_code);
+        if (!list) {
+          list = [];
+          allocationsMap.set(a.material_code, list);
+        }
+        list.push({ location_code: a.location_code, quantity: qty });
       }
     );
   });
 
   reportProgress(0.7);
 
-  // 3. Recreate the open reviews from the file's totals. Applied/dismissed
+  // 3. Recreate open reviews from the file's totals. Applied/dismissed
   //    reviews are kept as history.
   const { error: clearError } = await supabase
     .from("stock_reconciliation_reviews")
@@ -1329,6 +1360,7 @@ export async function bulkImportMb52(
 
   if (clearError) throw clearError;
 
+  const autoReconcileSingleBin = options?.autoReconcileSingleBin !== false;
   const reviewPayload: {
     material_code: string;
     short_description: string | null;
@@ -1338,6 +1370,9 @@ export async function bulkImportMb52(
     difference: number;
     sloc_breakdown: unknown;
     source_file: string | null;
+    status: "open" | "applied";
+    applied_at?: string | null;
+    applied_remarks?: string | null;
   }[] = [];
 
   for (const [materialCode, slocs] of byMaterial) {
@@ -1353,9 +1388,72 @@ export async function bulkImportMb52(
       continue;
     }
 
+    const materialAllocs = allocationsMap.get(materialCode) ?? [];
+    const activeBins = materialAllocs.filter((a) => a.quantity > 0);
+    const uniqueLocations = Array.from(
+      new Set(materialAllocs.map((a) => a.location_code))
+    );
+
+    // Strategy 4: A material is single-location if:
+    // - At most 1 bin currently has active (positive) stock, OR
+    // - All allocation rows exist in only 1 location, OR
+    // - No allocation rows exist at all (target = UNALLOCATED)
+    const isSingleLocation =
+      activeBins.length <= 1 || uniqueLocations.length <= 1;
+
+    if (autoReconcileSingleBin && isSingleLocation) {
+      const targetLocation =
+        activeBins.length === 1
+          ? activeBins[0].location_code
+          : uniqueLocations[0] || UNALLOCATED_LOCATION;
+
+      try {
+        await applyAdjustment(
+          materialCode,
+          targetLocation,
+          sapTotal,
+          "SAP Reconciliation",
+          fileName
+            ? `MB52 auto-reconcile single bin (${targetLocation}) from ${fileName}`
+            : `MB52 auto-reconcile single bin (${targetLocation})`
+        );
+
+        summary.singleBinAutoReconciled =
+          (summary.singleBinAutoReconciled ?? 0) + 1;
+
+        reviewPayload.push({
+          material_code: materialCode,
+          short_description:
+            masterInfo.get(materialCode)?.short_description ?? null,
+          uom: masterInfo.get(materialCode)?.uom ?? null,
+          sap_total: sapTotal,
+          app_total: appTotal,
+          difference: sapTotal - appTotal,
+          sloc_breakdown: Array.from(slocs.entries()).map(([sloc, qty]) => ({
+            storage_location: sloc,
+            quantity: qty,
+          })),
+          source_file: fileName ?? null,
+          status: "applied",
+          applied_at: new Date().toISOString(),
+          applied_remarks: `Auto-reconciled: single location ${targetLocation} adjusted (${appTotal} -> ${sapTotal})`,
+        });
+        continue;
+      } catch (err) {
+        console.warn(
+          `Auto-reconcile failed for ${materialCode}, queuing review:`,
+          err
+        );
+      }
+    }
+
+    // Multi-bin material or auto-reconcile turned off: queue as open review
+    summary.multiBinReviewsQueued =
+      (summary.multiBinReviewsQueued ?? 0) + 1;
     reviewPayload.push({
       material_code: materialCode,
-      short_description: masterInfo.get(materialCode)?.short_description ?? null,
+      short_description:
+        masterInfo.get(materialCode)?.short_description ?? null,
       uom: masterInfo.get(materialCode)?.uom ?? null,
       sap_total: sapTotal,
       app_total: appTotal,
@@ -1365,6 +1463,7 @@ export async function bulkImportMb52(
         quantity: qty,
       })),
       source_file: fileName ?? null,
+      status: "open",
     });
   }
 
@@ -1384,7 +1483,7 @@ export async function bulkImportMb52(
     }
   });
 
-  summary.reviewsCreated = reviewPayload.length;
+  summary.reviewsCreated = summary.multiBinReviewsQueued ?? 0;
 
   reportProgress(0.9);
 
@@ -1920,6 +2019,195 @@ export async function dismissSapReconciliation(
   if (error) throw error;
 }
 
+export interface ReconciliationClassification {
+  review: SapStockReview;
+  isSingleLocation: boolean;
+  targetLocation: string;
+  activeBins: { location_code: string; quantity: number }[];
+  allBins: { location_code: string; quantity: number }[];
+}
+
+/**
+ * Classifies open reconciliation reviews into single-location vs multi-bin.
+ * Strategy 4 uses this to auto-reconcile single-bin items and flag multi-bin ones.
+ */
+export async function classifyOpenReviews(
+  reviews?: SapStockReview[]
+): Promise<ReconciliationClassification[]> {
+  const openReviews =
+    reviews ??
+    (await getSapReconciliationReviews()).filter((r) => r.status === "open");
+  if (openReviews.length === 0) return [];
+
+  const materialCodes = Array.from(
+    new Set(openReviews.map((r) => r.material_code))
+  );
+  const allocationsMap = new Map<
+    string,
+    { location_code: string; quantity: number }[]
+  >();
+
+  await runChunked(materialCodes, async (batch) => {
+    const { data, error } = await supabase
+      .from("material_allocation")
+      .select("material_code, location_code, quantity")
+      .in("material_code", batch);
+
+    if (error) throw error;
+
+    (data ?? []).forEach(
+      (a: {
+        material_code: string;
+        location_code: string;
+        quantity: number;
+      }) => {
+        let list = allocationsMap.get(a.material_code);
+        if (!list) {
+          list = [];
+          allocationsMap.set(a.material_code, list);
+        }
+        list.push({
+          location_code: a.location_code,
+          quantity: Number(a.quantity),
+        });
+      }
+    );
+  });
+
+  return openReviews.map((review) => {
+    const allocs = allocationsMap.get(review.material_code) ?? [];
+    const activeBins = allocs.filter((a) => a.quantity > 0);
+    const uniqueLocs = Array.from(new Set(allocs.map((a) => a.location_code)));
+    const isSingleLocation = activeBins.length <= 1 || uniqueLocs.length <= 1;
+    const targetLocation =
+      activeBins.length === 1
+        ? activeBins[0].location_code
+        : uniqueLocs[0] || UNALLOCATED_LOCATION;
+
+    return {
+      review,
+      isSingleLocation,
+      targetLocation,
+      activeBins,
+      allBins: allocs,
+    };
+  });
+}
+
+/**
+ * Strategy 4: Automatically reconciles all open single-bin reviews.
+ * Materials allocated across multiple physical bins are skipped so the storekeeper
+ * can manually decide their shelf distribution.
+ */
+export async function bulkAutoReconcileSingleBinReviews(
+  onProgress?: (done: number, total: number) => void
+): Promise<{
+  reconciledCount: number;
+  multiBinCount: number;
+  failedCount: number;
+}> {
+  const classifications = await classifyOpenReviews();
+  const singleBinItems = classifications.filter((c) => c.isSingleLocation);
+  const multiBinItems = classifications.filter((c) => !c.isSingleLocation);
+
+  let reconciledCount = 0;
+  let failedCount = 0;
+
+  for (let i = 0; i < singleBinItems.length; i++) {
+    const item = singleBinItems[i];
+    try {
+      await applySapReconciliation(
+        item.review.id,
+        item.review.material_code,
+        [
+          {
+            location_code: item.targetLocation,
+            quantity: item.review.sap_total,
+          },
+        ],
+        `Auto-reconciled (Single-Bin Strategy: ${item.targetLocation})`
+      );
+      reconciledCount++;
+    } catch (err) {
+      console.error(`Failed to auto-reconcile review ${item.review.id}:`, err);
+      failedCount++;
+    }
+    onProgress?.(i + 1, singleBinItems.length);
+  }
+
+  return {
+    reconciledCount,
+    multiBinCount: multiBinItems.length,
+    failedCount,
+  };
+}
+
+/**
+ * Bulk reconciles multi-bin reviews by setting the delta into UNALLOCATED,
+ * leaving existing physical shelf bins intact.
+ */
+export async function bulkReconcileMultiBinToUnallocated(
+  reviewIds?: number[],
+  onProgress?: (done: number, total: number) => void
+): Promise<{
+  reconciledCount: number;
+  failedCount: number;
+  skippedDeficitCount: number;
+}> {
+  const allOpenReviews = (await getSapReconciliationReviews()).filter(
+    (r) => r.status === "open"
+  );
+  const targetReviews = reviewIds
+    ? allOpenReviews.filter((r) => reviewIds.includes(r.id))
+    : allOpenReviews;
+
+  let reconciledCount = 0;
+  let failedCount = 0;
+  let skippedDeficitCount = 0;
+
+  for (let i = 0; i < targetReviews.length; i++) {
+    const review = targetReviews[i];
+    try {
+      const allocs = await getAllocations(review.material_code);
+      const physicalBinsSum = allocs
+        .filter((a) => a.location_code !== UNALLOCATED_LOCATION)
+        .reduce((sum, a) => sum + Number(a.quantity), 0);
+
+      const targetUnallocated = review.sap_total - physicalBinsSum;
+      if (targetUnallocated < 0) {
+        skippedDeficitCount++;
+        continue;
+      }
+
+      await applySapReconciliation(
+        review.id,
+        review.material_code,
+        [
+          {
+            location_code: UNALLOCATED_LOCATION,
+            quantity: targetUnallocated,
+          },
+        ],
+        `Auto-reconciled delta to Unallocated (SAP ${review.sap_total} vs Physical Bins ${physicalBinsSum})`
+      );
+      reconciledCount++;
+    } catch (err) {
+      console.error(
+        `Failed to reconcile review ${review.id} to unallocated:`,
+        err
+      );
+      failedCount++;
+    }
+    onProgress?.(i + 1, targetReviews.length);
+  }
+
+  return {
+    reconciledCount,
+    failedCount,
+    skippedDeficitCount,
+  };
+}
+
 /* -------------------------------------------------------------------------
  * Import reports
  * ---------------------------------------------------------------------- */
@@ -2053,7 +2341,8 @@ export async function downloadMb52ImportReport(
       { label: "Distribution Rows Written", value: summary.distributionRowsWritten },
       { label: "Materials Processed", value: summary.materialsProcessed },
       { label: "Matched (SAP = App)", value: summary.matched },
-      { label: "Reviews Created (difference)", value: summary.reviewsCreated },
+      { label: "Single-Bin Auto-Reconciled", value: summary.singleBinAutoReconciled ?? 0 },
+      { label: "Multi-Bin Reviews Queued", value: summary.reviewsCreated },
       { label: "Materials Created", value: summary.materialsCreated },
       { label: "Failed", value: summary.failed },
     ],

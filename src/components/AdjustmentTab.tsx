@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   Alert,
@@ -6,18 +6,23 @@ import {
   Button,
   Card,
   CardContent,
+  Chip,
   CircularProgress,
+  LinearProgress,
   MenuItem,
   Snackbar,
   TextField,
   ToggleButton,
   ToggleButtonGroup,
+  Tooltip,
   Typography,
 } from "@mui/material";
 
 import TuneIcon from "@mui/icons-material/Tune";
 import AddIcon from "@mui/icons-material/Add";
 import RemoveIcon from "@mui/icons-material/Remove";
+import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh";
+import BalanceIcon from "@mui/icons-material/Balance";
 
 import MaterialSearch from "./MaterialSearch";
 import LocationSearch from "./LocationSearch";
@@ -32,8 +37,12 @@ import {
   getAllocations,
 } from "../services/materialAllocationService";
 import {
+  classifyOpenReviews,
+  bulkAutoReconcileSingleBinReviews,
+  bulkReconcileMultiBinToUnallocated,
   getSapReconciliationReviews,
   type SapStockReview,
+  type ReconciliationClassification,
 } from "../services/sapHistoryService";
 import SapReviewDialog from "./SapReviewDialog";
 
@@ -92,13 +101,37 @@ export default function AdjustmentTab() {
     (SapStockReview & { material_code: string }) | null
   >(null);
 
+  // Strategy 4 state
+  const [classifications, setClassifications] = useState<
+    Map<number, ReconciliationClassification>
+  >(new Map());
+  const [filterType, setFilterType] = useState<"all" | "single" | "multi">(
+    "all"
+  );
+  const [bulkReconciling, setBulkReconciling] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
+
   useEffect(() => {
     let cancelled = false;
 
     getSapReconciliationReviews()
-      .then((data) => {
+      .then(async (data) => {
         if (!cancelled) {
-          setReviews(data.filter((r) => r.status === "open"));
+          const open = data.filter((r) => r.status === "open");
+          setReviews(open);
+          try {
+            const classList = await classifyOpenReviews(open);
+            if (!cancelled) {
+              const map = new Map<number, ReconciliationClassification>();
+              classList.forEach((c) => map.set(c.review.id, c));
+              setClassifications(map);
+            }
+          } catch {
+            // ignore classification errors
+          }
         }
       })
       .catch(() => {
@@ -112,8 +145,116 @@ export default function AdjustmentTab() {
 
   function reloadReviews() {
     getSapReconciliationReviews()
-      .then((data) => setReviews(data.filter((r) => r.status === "open")))
+      .then(async (data) => {
+        const open = data.filter((r) => r.status === "open");
+        setReviews(open);
+        try {
+          const classList = await classifyOpenReviews(open);
+          const map = new Map<number, ReconciliationClassification>();
+          classList.forEach((c) => map.set(c.review.id, c));
+          setClassifications(map);
+        } catch {
+          // ignore
+        }
+      })
       .catch(() => setReviews([]));
+  }
+
+  const singleBinCount = useMemo(() => {
+    if (!reviews) return 0;
+    return reviews.filter(
+      (r) => classifications.get(r.id)?.isSingleLocation
+    ).length;
+  }, [reviews, classifications]);
+
+  const multiBinCount = useMemo(() => {
+    if (!reviews) return 0;
+    return reviews.length - singleBinCount;
+  }, [reviews, singleBinCount]);
+
+  const filteredReviews = useMemo(() => {
+    if (!reviews) return [];
+    if (filterType === "single") {
+      return reviews.filter(
+        (r) => classifications.get(r.id)?.isSingleLocation
+      );
+    }
+    if (filterType === "multi") {
+      return reviews.filter(
+        (r) =>
+          classifications.has(r.id) &&
+          !classifications.get(r.id)?.isSingleLocation
+      );
+    }
+    return reviews;
+  }, [reviews, filterType, classifications]);
+
+  const activeReviewIndex = useMemo(() => {
+    if (!activeReview || !filteredReviews) return -1;
+    return filteredReviews.findIndex((r) => r.id === activeReview.id);
+  }, [activeReview, filteredReviews]);
+
+  function handleApplyAndNext() {
+    if (
+      activeReviewIndex >= 0 &&
+      activeReviewIndex < filteredReviews.length - 1
+    ) {
+      setActiveReview(filteredReviews[activeReviewIndex + 1]);
+    } else {
+      setActiveReview(null);
+    }
+    reloadReviews();
+  }
+
+  async function handleAutoReconcileSingleBin() {
+    if (singleBinCount === 0) return;
+    setBulkReconciling(true);
+    setBulkProgress({ done: 0, total: singleBinCount });
+    try {
+      const res = await bulkAutoReconcileSingleBinReviews((done, total) => {
+        setBulkProgress({ done, total });
+      });
+      showSnackbar(
+        `Auto-reconciled ${res.reconciledCount} single-location material(s)! ${res.multiBinCount} multi-bin item(s) remain for review.`,
+        "success"
+      );
+      reloadReviews();
+    } catch (err) {
+      showSnackbar(
+        err instanceof Error ? err.message : "Bulk auto-reconciliation failed.",
+        "error"
+      );
+    } finally {
+      setBulkReconciling(false);
+      setBulkProgress(null);
+    }
+  }
+
+  async function handleReconcileMultiToUnallocated() {
+    if (multiBinCount === 0) return;
+    setBulkReconciling(true);
+    setBulkProgress({ done: 0, total: multiBinCount });
+    try {
+      const res = await bulkReconcileMultiBinToUnallocated(
+        undefined,
+        (done, total) => {
+          setBulkProgress({ done, total });
+        }
+      );
+      showSnackbar(
+        `Reconciled ${res.reconciledCount} multi-bin material(s) into the Unallocated buffer.`,
+        "success"
+      );
+      reloadReviews();
+    } catch (err) {
+      showSnackbar(
+        err instanceof Error ? err.message : "Multi-bin reconciliation failed.",
+        "error"
+      );
+    } finally {
+      setBulkReconciling(false);
+      setBulkProgress(null);
+    }
   }
 
   // No location means "Unallocated" for both directions - Increase adds
@@ -219,14 +360,149 @@ export default function AdjustmentTab() {
   return (
     <Box sx={{ mt: 1.5 }}>
       {reviews !== null && reviews.length > 0 && (
-        <Box sx={{ mb: 1.5 }}>
-          <Typography sx={{ fontWeight: 700, fontSize: "0.9rem", mb: 0.75 }}>
-            SAP Reconciliation - {reviews.length} open review(s)
-          </Typography>
+        <Box sx={{ mb: 2 }}>
+          {/* Strategy 4 Automated Reconciliation Control Card */}
+          <Card
+            elevation={0}
+            sx={{
+              p: 1.75,
+              mb: 1.5,
+              borderRadius: 2,
+              border: "1px solid",
+              borderColor: "divider",
+              bgcolor: "background.paper",
+            }}
+          >
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                flexWrap: "wrap",
+                gap: 1,
+                mb: 1.25,
+              }}
+            >
+              <Box>
+                <Typography sx={{ fontWeight: 800, fontSize: "0.95rem" }}>
+                  SAP Reconciliation (Strategy 4)
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {reviews.length} open discrepancy review(s) from MB52 stock snapshot
+                </Typography>
+              </Box>
 
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                {singleBinCount > 0 && (
+                  <Tooltip title="Automatically reconciles all materials that exist in only one bin location directly to their SAP total">
+                    <Button
+                      size="small"
+                      variant="contained"
+                      color="success"
+                      startIcon={
+                        bulkReconciling ? (
+                          <CircularProgress size={16} color="inherit" />
+                        ) : (
+                          <AutoFixHighIcon />
+                        )
+                      }
+                      onClick={handleAutoReconcileSingleBin}
+                      disabled={bulkReconciling}
+                      sx={{ borderRadius: 2, fontWeight: 700, textTransform: "none" }}
+                    >
+                      Auto-Reconcile Single-Bin ({singleBinCount})
+                    </Button>
+                  </Tooltip>
+                )}
+
+                {multiBinCount > 0 && (
+                  <Tooltip title="Assigns the discrepancy for all multi-bin materials directly into the UNALLOCATED buffer, preserving current physical shelf quantities">
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="primary"
+                      startIcon={<BalanceIcon />}
+                      onClick={handleReconcileMultiToUnallocated}
+                      disabled={bulkReconciling}
+                      sx={{ borderRadius: 2, fontWeight: 700, textTransform: "none" }}
+                    >
+                      Multi-Bin to Unallocated ({multiBinCount})
+                    </Button>
+                  </Tooltip>
+                )}
+              </Box>
+            </Box>
+
+            {bulkProgress && (
+              <Box sx={{ my: 1.25 }}>
+                <Box
+                  sx={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    mb: 0.5,
+                  }}
+                >
+                  <Typography variant="caption" color="text.secondary">
+                    Auto-reconciling in progress...
+                  </Typography>
+                  <Typography variant="caption" sx={{ fontWeight: 700 }}>
+                    {bulkProgress.done} / {bulkProgress.total}
+                  </Typography>
+                </Box>
+                <LinearProgress
+                  variant="determinate"
+                  value={
+                    bulkProgress.total > 0
+                      ? (bulkProgress.done / bulkProgress.total) * 100
+                      : 0
+                  }
+                  sx={{ height: 6, borderRadius: 3 }}
+                />
+              </Box>
+            )}
+
+            {/* Filter chips */}
+            <Box sx={{ display: "flex", alignItems: "center", gap: 1, pt: 0.5 }}>
+              <Chip
+                label={`All (${reviews.length})`}
+                size="small"
+                clickable
+                color={filterType === "all" ? "primary" : "default"}
+                variant={filterType === "all" ? "filled" : "outlined"}
+                onClick={() => setFilterType("all")}
+                sx={{ fontWeight: 600 }}
+              />
+              <Chip
+                icon={<AutoFixHighIcon fontSize="small" />}
+                label={`Single-Bin (${singleBinCount})`}
+                size="small"
+                clickable
+                color={filterType === "single" ? "success" : "default"}
+                variant={filterType === "single" ? "filled" : "outlined"}
+                onClick={() => setFilterType("single")}
+                sx={{ fontWeight: 600 }}
+              />
+              <Chip
+                icon={<BalanceIcon fontSize="small" />}
+                label={`Multi-Bin Review (${multiBinCount})`}
+                size="small"
+                clickable
+                color={filterType === "multi" ? "primary" : "default"}
+                variant={filterType === "multi" ? "filled" : "outlined"}
+                onClick={() => setFilterType("multi")}
+                sx={{ fontWeight: 600 }}
+              />
+            </Box>
+          </Card>
+
+          {/* List of filtered reviews */}
           <Box sx={{ display: "flex", flexDirection: "column", gap: 0.75 }}>
-            {reviews.map((review) => {
+            {filteredReviews.map((review) => {
               const diff = review.difference;
+              const classification = classifications.get(review.id);
+              const isSingle = classification?.isSingleLocation;
+              const activeCount = classification?.activeBins.length ?? 0;
+
               return (
                 <Box
                   key={review.id}
@@ -238,12 +514,34 @@ export default function AdjustmentTab() {
                     bgcolor: "background.paper",
                   }}
                 >
-                  <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 1 }}>
+                  <Box
+                    sx={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      justifyContent: "space-between",
+                      gap: 1,
+                    }}
+                  >
                     <Box sx={{ minWidth: 0 }}>
-                      <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                        {review.material_code}
-                        {review.short_description ? ` - ${review.short_description}` : ""}
-                      </Typography>
+                      <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap", mb: 0.25 }}>
+                        <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                          {review.material_code}
+                          {review.short_description ? ` - ${review.short_description}` : ""}
+                        </Typography>
+                        {classification && (
+                          <Chip
+                            label={
+                              isSingle
+                                ? "Single-Bin"
+                                : `Multi-Bin (${activeCount} bins)`
+                            }
+                            size="small"
+                            color={isSingle ? "success" : "primary"}
+                            variant="outlined"
+                            sx={{ height: 20, fontSize: "0.7rem", fontWeight: 700 }}
+                          />
+                        )}
+                      </Box>
                       <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
                         SAP {review.sap_total} ({
                           (review.sloc_breakdown ?? [])
@@ -424,6 +722,13 @@ export default function AdjustmentTab() {
           showSnackbar("Reconciliation updated.", "success");
         }}
         onError={(message) => showSnackbar(message, "error")}
+        onApplyAndNext={handleApplyAndNext}
+        hasNextReview={
+          activeReviewIndex >= 0 &&
+          activeReviewIndex < filteredReviews.length - 1
+        }
+        reviewIndex={activeReviewIndex >= 0 ? activeReviewIndex : undefined}
+        totalOpenReviews={filteredReviews.length}
       />
 
       <Snackbar

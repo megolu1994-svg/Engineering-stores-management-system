@@ -598,21 +598,30 @@ function Mb52Tab({
       {summary && (
         <Alert
           severity={summary.reviewsCreated > 0 ? "info" : "success"}
-          sx={{ borderRadius: 2, py: 0.25 }}
+          sx={{ borderRadius: 2, py: 0.5 }}
         >
           <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
             <Inventory2Icon fontSize="small" />
             <span>
-              Distribution rows: {summary.distributionRowsWritten}, Materials:{" "}
-              {summary.materialsProcessed}, Matched: {summary.matched},
-              Reviews created: {summary.reviewsCreated}, New materials created{" "}
-              &amp; posted to Unallocated: {summary.newMaterialsPosted},
-              Failed: {summary.failed}
+              Distribution rows: {summary.distributionRowsWritten} · Materials:{" "}
+              {summary.materialsProcessed} · Matched: {summary.matched}
+              {summary.singleBinAutoReconciled !== undefined && summary.singleBinAutoReconciled > 0 && (
+                <> · <strong>Auto-reconciled (Single-Bin): {summary.singleBinAutoReconciled}</strong></>
+              )}
+              {summary.reviewsCreated > 0 && (
+                <> · Multi-bin reviews queued: {summary.reviewsCreated}</>
+              )}
+              {summary.newMaterialsPosted > 0 && (
+                <> · New materials posted to Unallocated: {summary.newMaterialsPosted}</>
+              )}
+              {summary.failed > 0 && (
+                <> · Failed: {summary.failed}</>
+              )}
             </span>
           </Box>
           {summary.reviewsCreated > 0 && (
             <Typography variant="caption" sx={{ display: "block", mt: 0.5 }}>
-              Differences found - review them under Inventory → Adjust.
+              {summary.reviewsCreated} multi-bin material(s) have variances to review under Inventory → Adjust.
             </Typography>
           )}
         </Alert>
@@ -784,12 +793,19 @@ export default function SapHistoryImportCard({ onImportComplete }: Props) {
       );
       setMb52Summary(result);
       await downloadMb52ImportReport(mb52Validation, result, mb52File?.name);
-      showSnackbar(
-        result.reviewsCreated > 0
-          ? `Snapshot imported. ${result.reviewsCreated} reconciliation review(s) created - check Inventory → Adjust.`
-          : "Snapshot imported. All totals matched.",
-        result.failed > 0 ? "warning" : "success"
-      );
+      const autoReconciled = result.singleBinAutoReconciled ?? 0;
+      const reviews = result.reviewsCreated;
+      let msg = "Snapshot imported. ";
+      if (autoReconciled > 0 && reviews > 0) {
+        msg += `${autoReconciled} single-bin material(s) auto-reconciled; ${reviews} multi-bin review(s) queued for review.`;
+      } else if (autoReconciled > 0) {
+        msg += `All ${autoReconciled} single-bin material(s) auto-reconciled to SAP totals!`;
+      } else if (reviews > 0) {
+        msg += `${reviews} reconciliation review(s) created - check Inventory → Adjust.`;
+      } else {
+        msg += "All totals matched.";
+      }
+      showSnackbar(msg, result.failed > 0 ? "warning" : "success");
       onImportComplete?.();
     } catch {
       showSnackbar("MB52 import failed unexpectedly.", "error");
