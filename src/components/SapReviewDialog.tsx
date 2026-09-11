@@ -232,6 +232,34 @@ export default function SapReviewDialog({
     );
   }
 
+  /** Quick action: Single-Bin Rule (Deficit from single bin, surplus to Unallocated) */
+  function handleSingleBinRuleBalance() {
+    if (!review) return;
+    const origTotal = locations.reduce((s, r) => s + r.original, 0);
+    const diff = target - origTotal;
+
+    if (diff > 0) {
+      // Surplus -> extra quantity goes to UNALLOCATED; physical bins keep original count
+      handlePutDeltaInUnallocated();
+    } else {
+      // Deficit -> decrease from the single physical bin (or UNALLOCATED if no physical bin)
+      const phys = locations.find(
+        (r) => r.location_code !== UNALLOCATED_LOCATION
+      );
+      setLocations((prev) =>
+        prev.map((r) => {
+          if (phys && r.location_code === phys.location_code) {
+            return { ...r, quantity: String(target) };
+          }
+          if (!phys && r.location_code === UNALLOCATED_LOCATION) {
+            return { ...r, quantity: String(target) };
+          }
+          return { ...r, quantity: "0" };
+        })
+      );
+    }
+  }
+
   async function performApply() {
     if (!review || !totalMatches || hasInvalidValue) return;
 
@@ -460,6 +488,33 @@ export default function SapReviewDialog({
                 <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700, mr: 0.5 }}>
                   Quick Balance:
                 </Typography>
+
+                {!isMultiBin && (
+                  <Tooltip
+                    title={
+                      review.difference > 0
+                        ? `Strategy 4: Surplus (+${review.difference}) goes to UNALLOCATED; physical bin remains intact`
+                        : `Strategy 4: Deficit is deducted directly from the single bin`
+                    }
+                  >
+                    <Button
+                      size="small"
+                      variant="contained"
+                      color="success"
+                      startIcon={<AutoFixHighIcon />}
+                      onClick={handleSingleBinRuleBalance}
+                      disabled={loading || isBusy}
+                      sx={{
+                        textTransform: "none",
+                        borderRadius: 1.5,
+                        py: 0.25,
+                        fontWeight: 700,
+                      }}
+                    >
+                      Single-Bin Rule
+                    </Button>
+                  </Tooltip>
+                )}
 
                 <Tooltip title="Absorbs the discrepancy into the UNALLOCATED bucket without disturbing physical shelf bins">
                   <Button

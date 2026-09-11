@@ -8,6 +8,11 @@ import {
   CardContent,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   LinearProgress,
   MenuItem,
   Snackbar,
@@ -23,6 +28,8 @@ import AddIcon from "@mui/icons-material/Add";
 import RemoveIcon from "@mui/icons-material/Remove";
 import AutoFixHighIcon from "@mui/icons-material/AutoFixHigh";
 import BalanceIcon from "@mui/icons-material/Balance";
+import UndoIcon from "@mui/icons-material/Undo";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 
 import MaterialSearch from "./MaterialSearch";
 import LocationSearch from "./LocationSearch";
@@ -41,6 +48,9 @@ import {
   bulkAutoReconcileSingleBinReviews,
   bulkReconcileMultiBinToUnallocated,
   getSapReconciliationReviews,
+  getAppliedSingleBinReviews,
+  revertAppliedSingleBinReviewsToOpen,
+  rebalanceAppliedSingleBinSurplus,
   type SapStockReview,
   type ReconciliationClassification,
 } from "../services/sapHistoryService";
@@ -114,6 +124,24 @@ export default function AdjustmentTab() {
     total: number;
   } | null>(null);
 
+  // Recovery & Revert state for previously applied single-bin auto-reconciliations
+  const [appliedSingleBinReviews, setAppliedSingleBinReviews] = useState<
+    (SapStockReview & { material_code: string })[]
+  >([]);
+  const [confirmRevertOpen, setConfirmRevertOpen] = useState(false);
+  const [confirmRebalanceOpen, setConfirmRebalanceOpen] = useState(false);
+  const [actionProgress, setActionProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+
+  function loadAppliedReviews() {
+    getAppliedSingleBinReviews()
+      .then((data) => setAppliedSingleBinReviews(data))
+      .catch(() => setAppliedSingleBinReviews([]));
+  }
+
   useEffect(() => {
     let cancelled = false;
 
@@ -138,6 +166,8 @@ export default function AdjustmentTab() {
         if (!cancelled) setReviews([]);
       });
 
+    loadAppliedReviews();
+
     return () => {
       cancelled = true;
     };
@@ -158,6 +188,8 @@ export default function AdjustmentTab() {
         }
       })
       .catch(() => setReviews([]));
+
+    loadAppliedReviews();
   }
 
   const singleBinCount = useMemo(() => {
@@ -254,6 +286,63 @@ export default function AdjustmentTab() {
     } finally {
       setBulkReconciling(false);
       setBulkProgress(null);
+    }
+  }
+
+  const appliedSurplusCount = useMemo(
+    () => appliedSingleBinReviews.filter((r) => r.difference > 0).length,
+    [appliedSingleBinReviews]
+  );
+  const appliedDeficitCount = useMemo(
+    () => appliedSingleBinReviews.filter((r) => r.difference < 0).length,
+    [appliedSingleBinReviews]
+  );
+
+  async function handleRevertAppliedSingleBin() {
+    setActionBusy(true);
+    setActionProgress({ done: 0, total: appliedSingleBinReviews.length });
+    try {
+      const res = await revertAppliedSingleBinReviewsToOpen((done, total) => {
+        setActionProgress({ done, total });
+      });
+      showSnackbar(
+        `Successfully reverted ${res.revertedCount} single-bin item(s) back to Open Reviews!`,
+        "success"
+      );
+      setConfirmRevertOpen(false);
+      reloadReviews();
+    } catch (err) {
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to revert single-bin items.",
+        "error"
+      );
+    } finally {
+      setActionBusy(false);
+      setActionProgress(null);
+    }
+  }
+
+  async function handleRebalanceAppliedSurplus() {
+    setActionBusy(true);
+    setActionProgress({ done: 0, total: appliedSurplusCount });
+    try {
+      const res = await rebalanceAppliedSingleBinSurplus((done, total) => {
+        setActionProgress({ done, total });
+      });
+      showSnackbar(
+        `Rebalanced ${res.rebalancedCount} surplus item(s): shifted ${res.totalQuantityShifted} units of extra SAP stock into Unallocated, restoring physical shelf counts.`,
+        "success"
+      );
+      setConfirmRebalanceOpen(false);
+      reloadReviews();
+    } catch (err) {
+      showSnackbar(
+        err instanceof Error ? err.message : "Failed to shift surplus to unallocated.",
+        "error"
+      );
+    } finally {
+      setActionBusy(false);
+      setActionProgress(null);
     }
   }
 
@@ -359,6 +448,101 @@ export default function AdjustmentTab() {
 
   return (
     <Box sx={{ mt: 1.5 }}>
+      {/* Recovery & Revert Banner for Previously Applied Single-Bin Items */}
+      {appliedSingleBinReviews.length > 0 && (
+        <Card
+          elevation={0}
+          sx={{
+            p: 2,
+            mb: 2,
+            borderRadius: 2,
+            border: "1px solid",
+            borderColor: "warning.main",
+            bgcolor: "warning.50",
+          }}
+        >
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "flex-start",
+              justifyContent: "space-between",
+              gap: 2,
+              flexWrap: "wrap",
+            }}
+          >
+            <Box sx={{ maxWidth: 650 }}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 0.5 }}>
+                <WarningAmberIcon color="warning" />
+                <Typography variant="subtitle2" sx={{ fontWeight: 800, color: "warning.dark" }}>
+                  {appliedSingleBinReviews.length} Single-Bin Items Recently Reconciled
+                </Typography>
+              </Box>
+              <Typography variant="body2" sx={{ fontSize: "0.85rem", color: "text.primary", mb: 0.5 }}>
+                {appliedSurplusCount} item(s) had extra SAP stock (surplus), and {appliedDeficitCount} item(s) had stock reduced.
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                Choose <strong>Shift Surplus to Unallocated</strong> to move the extra quantity of surplus items into the UNALLOCATED buffer and restore physical shelf bins, or <strong>Revert to Open Reviews</strong> to undo adjustments and return all {appliedSingleBinReviews.length} items to the review queue.
+              </Typography>
+            </Box>
+
+            <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", alignItems: "center" }}>
+              <Button
+                size="small"
+                variant="contained"
+                color="warning"
+                startIcon={<UndoIcon />}
+                onClick={() => setConfirmRevertOpen(true)}
+                disabled={actionBusy || bulkReconciling}
+                sx={{ borderRadius: 2, fontWeight: 700, textTransform: "none" }}
+              >
+                Revert to Open Reviews ({appliedSingleBinReviews.length})
+              </Button>
+
+              {appliedSurplusCount > 0 && (
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="primary"
+                  startIcon={<BalanceIcon />}
+                  onClick={() => setConfirmRebalanceOpen(true)}
+                  disabled={actionBusy || bulkReconciling}
+                  sx={{
+                    borderRadius: 2,
+                    fontWeight: 700,
+                    textTransform: "none",
+                    bgcolor: "background.paper",
+                  }}
+                >
+                  Shift Surplus to Unallocated ({appliedSurplusCount})
+                </Button>
+              )}
+            </Box>
+          </Box>
+
+          {actionProgress && (
+            <Box sx={{ mt: 1.5 }}>
+              <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.5 }}>
+                <Typography variant="caption" color="text.secondary">
+                  Processing adjustments...
+                </Typography>
+                <Typography variant="caption" sx={{ fontWeight: 700 }}>
+                  {actionProgress.done} / {actionProgress.total}
+                </Typography>
+              </Box>
+              <LinearProgress
+                variant="determinate"
+                value={
+                  actionProgress.total > 0
+                    ? (actionProgress.done / actionProgress.total) * 100
+                    : 0
+                }
+                sx={{ height: 6, borderRadius: 3 }}
+              />
+            </Box>
+          )}
+        </Card>
+      )}
+
       {reviews !== null && reviews.length > 0 && (
         <Box sx={{ mb: 2 }}>
           {/* Strategy 4 Automated Reconciliation Control Card */}
@@ -394,7 +578,7 @@ export default function AdjustmentTab() {
 
               <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
                 {singleBinCount > 0 && (
-                  <Tooltip title="Automatically reconciles all materials that exist in only one bin location directly to their SAP total">
+                  <Tooltip title="Auto-reconciles single-location items: extra SAP stock (surplus) goes to Unallocated buffer to protect shelf counts, while deficits are deducted from the single bin">
                     <Button
                       size="small"
                       variant="contained"
@@ -730,6 +914,88 @@ export default function AdjustmentTab() {
         reviewIndex={activeReviewIndex >= 0 ? activeReviewIndex : undefined}
         totalOpenReviews={filteredReviews.length}
       />
+
+      {/* Revert Single-Bin Reconciliation Confirmation Dialog */}
+      <Dialog
+        open={confirmRevertOpen}
+        onClose={() => !actionBusy && setConfirmRevertOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ fontWeight: 800 }}>
+          Revert {appliedSingleBinReviews.length} Single-Bin Adjustments?
+        </DialogTitle>
+        <DialogContent dividers>
+          <DialogContentText sx={{ mb: 1.5, color: "text.primary" }}>
+            This will reverse all adjustments made by the previous single-bin reconciliation:
+          </DialogContentText>
+          <Box component="ul" sx={{ pl: 2.5, m: 0, fontSize: "0.875rem", color: "text.secondary", display: "flex", flexDirection: "column", gap: 1 }}>
+            <li>Physical shelf bins will be restored back to their original counts prior to reconciliation.</li>
+            <li>All <strong>{appliedSingleBinReviews.length}</strong> items will return to the <strong>Open Reviews</strong> list.</li>
+            <li>You can then click <em>Auto-Reconcile Single-Bin</em> to re-run reconciliation using the corrected logic (where surpluses go to Unallocated and deficits reduce the single bin).</li>
+          </Box>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button
+            onClick={() => setConfirmRevertOpen(false)}
+            disabled={actionBusy}
+            sx={{ fontWeight: 600 }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            color="warning"
+            startIcon={actionBusy ? <CircularProgress size={16} color="inherit" /> : <UndoIcon />}
+            onClick={handleRevertAppliedSingleBin}
+            disabled={actionBusy}
+            sx={{ fontWeight: 700 }}
+          >
+            {actionBusy ? "Reverting..." : "Confirm Revert to Open"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Rebalance Surplus to Unallocated Confirmation Dialog */}
+      <Dialog
+        open={confirmRebalanceOpen}
+        onClose={() => !actionBusy && setConfirmRebalanceOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ fontWeight: 800 }}>
+          Shift Surplus to Unallocated ({appliedSurplusCount} items)?
+        </DialogTitle>
+        <DialogContent dividers>
+          <DialogContentText sx={{ mb: 1.5, color: "text.primary" }}>
+            This performs a direct repair on the {appliedSurplusCount} surplus items without touching deficit items:
+          </DialogContentText>
+          <Box component="ul" sx={{ pl: 2.5, m: 0, fontSize: "0.875rem", color: "text.secondary", display: "flex", flexDirection: "column", gap: 1 }}>
+            <li>For each surplus item (where SAP &gt; App), the physical shelf bin is restored to its physical count.</li>
+            <li>The extra SAP surplus quantity is shifted into the <strong>UNALLOCATED</strong> buffer location.</li>
+            <li>The {appliedDeficitCount} items that had deficits remain correctly deducted from their single bin.</li>
+          </Box>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button
+            onClick={() => setConfirmRebalanceOpen(false)}
+            disabled={actionBusy}
+            sx={{ fontWeight: 600 }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            color="primary"
+            startIcon={actionBusy ? <CircularProgress size={16} color="inherit" /> : <BalanceIcon />}
+            onClick={handleRebalanceAppliedSurplus}
+            disabled={actionBusy}
+            sx={{ fontWeight: 700 }}
+          >
+            {actionBusy ? "Shifting..." : "Confirm Shift Surplus"}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Snackbar
         open={snackbar.open}

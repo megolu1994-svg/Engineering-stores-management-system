@@ -1407,16 +1407,45 @@ export async function bulkImportMb52(
           ? activeBins[0].location_code
           : uniqueLocations[0] || UNALLOCATED_LOCATION;
 
+      const diff = sapTotal - appTotal;
+
       try {
-        await applyAdjustment(
-          materialCode,
-          targetLocation,
-          sapTotal,
-          "SAP Reconciliation",
-          fileName
-            ? `MB52 auto-reconcile single bin (${targetLocation}) from ${fileName}`
-            : `MB52 auto-reconcile single bin (${targetLocation})`
-        );
+        let appliedRemarksText = "";
+
+        if (diff > 0) {
+          // Rule: If app stock < SAP stock (diff > 0), the extra quantity
+          // ALWAYS goes to UNALLOCATED. The physical bin keeps its verified stock.
+          const currentUnalloc =
+            materialAllocs.find((a) => a.location_code === UNALLOCATED_LOCATION)
+              ?.quantity ?? 0;
+          const newUnalloc = currentUnalloc + diff;
+
+          await applyAdjustment(
+            materialCode,
+            UNALLOCATED_LOCATION,
+            newUnalloc,
+            "SAP Reconciliation",
+            fileName
+              ? `MB52 auto-reconcile surplus (+${diff}) to UNALLOCATED from ${fileName}`
+              : `MB52 auto-reconcile surplus (+${diff}) to UNALLOCATED`
+          );
+
+          appliedRemarksText = `Auto-reconciled (Single-Bin Strategy: ${targetLocation}): +${diff} surplus to UNALLOCATED (${targetLocation !== UNALLOCATED_LOCATION ? `${targetLocation} retained` : "unallocated"})`;
+        } else {
+          // Rule: If app stock > SAP stock (diff < 0), stock should decrease
+          // from the single bin (or unallocated).
+          await applyAdjustment(
+            materialCode,
+            targetLocation,
+            sapTotal,
+            "SAP Reconciliation",
+            fileName
+              ? `MB52 auto-reconcile decrease: single bin (${targetLocation}) reduced to ${sapTotal} from ${fileName}`
+              : `MB52 auto-reconcile decrease: single bin (${targetLocation}) reduced to ${sapTotal}`
+          );
+
+          appliedRemarksText = `Auto-reconciled (Single-Bin Strategy: ${targetLocation}): reduced from ${appTotal} to ${sapTotal}`;
+        }
 
         summary.singleBinAutoReconciled =
           (summary.singleBinAutoReconciled ?? 0) + 1;
@@ -1428,7 +1457,7 @@ export async function bulkImportMb52(
           uom: masterInfo.get(materialCode)?.uom ?? null,
           sap_total: sapTotal,
           app_total: appTotal,
-          difference: sapTotal - appTotal,
+          difference: diff,
           sloc_breakdown: Array.from(slocs.entries()).map(([sloc, qty]) => ({
             storage_location: sloc,
             quantity: qty,
@@ -1436,7 +1465,7 @@ export async function bulkImportMb52(
           source_file: fileName ?? null,
           status: "applied",
           applied_at: new Date().toISOString(),
-          applied_remarks: `Auto-reconciled: single location ${targetLocation} adjusted (${appTotal} -> ${sapTotal})`,
+          applied_remarks: appliedRemarksText,
         });
         continue;
       } catch (err) {
@@ -2096,8 +2125,11 @@ export async function classifyOpenReviews(
 
 /**
  * Strategy 4: Automatically reconciles all open single-bin reviews.
- * Materials allocated across multiple physical bins are skipped so the storekeeper
- * can manually decide their shelf distribution.
+ * Rule:
+ *  - If app stock < SAP stock (diff > 0): The extra quantity ALWAYS goes to UNALLOCATED.
+ *    The physical bin keeps its physical count.
+ *  - If app stock > SAP stock (diff < 0): Stock decreases from the single bin.
+ * Multi-bin materials are skipped so the storekeeper can manually decide their shelf distribution.
  */
 export async function bulkAutoReconcileSingleBinReviews(
   onProgress?: (done: number, total: number) => void
@@ -2115,17 +2147,44 @@ export async function bulkAutoReconcileSingleBinReviews(
 
   for (let i = 0; i < singleBinItems.length; i++) {
     const item = singleBinItems[i];
+    const { review, targetLocation, allBins } = item;
+    const sapTotal = review.sap_total;
+    const appTotal = review.app_total;
+    const diff = sapTotal - appTotal;
+
     try {
+      const locPlan: { location_code: string; quantity: number }[] = [];
+      let remark = "";
+
+      if (diff > 0) {
+        // App stock < SAP stock -> extra quantity MUST go to UNALLOCATED.
+        // Physical bin retains its existing quantity.
+        const currentUnalloc =
+          allBins.find((b) => b.location_code === UNALLOCATED_LOCATION)
+            ?.quantity ?? 0;
+        const newUnalloc = currentUnalloc + diff;
+
+        locPlan.push({
+          location_code: UNALLOCATED_LOCATION,
+          quantity: newUnalloc,
+        });
+
+        remark = `Auto-reconciled (Single-Bin Strategy: ${targetLocation}): +${diff} surplus to UNALLOCATED (${targetLocation !== UNALLOCATED_LOCATION ? `${targetLocation} retained` : "unallocated"})`;
+      } else {
+        // App stock > SAP stock -> decrease from the single bin (or unallocated)
+        locPlan.push({
+          location_code: targetLocation,
+          quantity: sapTotal,
+        });
+
+        remark = `Auto-reconciled (Single-Bin Strategy: ${targetLocation}): reduced from ${appTotal} to ${sapTotal}`;
+      }
+
       await applySapReconciliation(
-        item.review.id,
-        item.review.material_code,
-        [
-          {
-            location_code: item.targetLocation,
-            quantity: item.review.sap_total,
-          },
-        ],
-        `Auto-reconciled (Single-Bin Strategy: ${item.targetLocation})`
+        review.id,
+        review.material_code,
+        locPlan,
+        remark
       );
       reconciledCount++;
     } catch (err) {
@@ -2140,6 +2199,189 @@ export async function bulkAutoReconcileSingleBinReviews(
     multiBinCount: multiBinItems.length,
     failedCount,
   };
+}
+
+/**
+ * Retrieves all reconciliation reviews that were previously applied via single-bin auto-reconciliation.
+ */
+export async function getAppliedSingleBinReviews(): Promise<
+  (SapStockReview & { material_code: string })[]
+> {
+  const allReviews = await getSapReconciliationReviews();
+  return allReviews.filter(
+    (r) =>
+      r.status === "applied" &&
+      (r.applied_remarks?.toLowerCase().includes("single-bin") ||
+        r.applied_remarks?.toLowerCase().includes("single bin") ||
+        r.applied_remarks?.toLowerCase().includes("single location") ||
+        r.applied_remarks?.toLowerCase().includes("auto-reconciled"))
+  );
+}
+
+/**
+ * Reverts applied single-bin reviews back to "open" status.
+ * Restores each material's adjusted location back to its pre-reconciliation physical count (review.app_total).
+ */
+export async function revertAppliedSingleBinReviewsToOpen(
+  onProgress?: (done: number, total: number) => void
+): Promise<{ revertedCount: number; failedCount: number }> {
+  const appliedReviews = await getAppliedSingleBinReviews();
+  let revertedCount = 0;
+  let failedCount = 0;
+
+  for (let i = 0; i < appliedReviews.length; i++) {
+    const review = appliedReviews[i];
+    try {
+      // Find the location that was adjusted
+      const match =
+        review.applied_remarks?.match(/Single-Bin Strategy:\s*([^)]+)/i) ||
+        review.applied_remarks?.match(/single bin \(([^)]+)\)/i) ||
+        review.applied_remarks?.match(/single location ([^\s]+)/i);
+
+      let targetLoc = match ? match[1].trim() : null;
+      const allocs = await getAllocations(review.material_code);
+
+      if (!targetLoc) {
+        const phys = allocs.find(
+          (a) => a.location_code !== UNALLOCATED_LOCATION && a.quantity > 0
+        );
+        targetLoc = phys ? phys.location_code : UNALLOCATED_LOCATION;
+      }
+
+      // Revert the target location back to app_total
+      await applyAdjustment(
+        review.material_code,
+        targetLoc,
+        review.app_total,
+        "SAP Reconciliation",
+        `Revert single-bin reconciliation: restored ${targetLoc} to ${review.app_total}`
+      );
+
+      // If UNALLOCATED was modified, clear it back to 0
+      const unalloc = allocs.find(
+        (a) => a.location_code === UNALLOCATED_LOCATION
+      );
+      if (
+        unalloc &&
+        targetLoc !== UNALLOCATED_LOCATION &&
+        unalloc.quantity > 0
+      ) {
+        await applyAdjustment(
+          review.material_code,
+          UNALLOCATED_LOCATION,
+          0,
+          "SAP Reconciliation",
+          "Revert single-bin reconciliation: cleared unallocated buffer"
+        );
+      }
+
+      // Reset review status to open
+      const { error } = await supabase
+        .from("stock_reconciliation_reviews")
+        .update({
+          status: "open",
+          applied_at: null,
+          applied_remarks: null,
+        })
+        .eq("id", review.id);
+
+      if (error) throw error;
+      revertedCount++;
+    } catch (err) {
+      console.error(`Failed to revert review ${review.id}:`, err);
+      failedCount++;
+    }
+    onProgress?.(i + 1, appliedReviews.length);
+  }
+
+  return { revertedCount, failedCount };
+}
+
+/**
+ * Direct repair for previously reconciled single-bin items:
+ * For any applied single-bin review where SAP > App (surplus),
+ * the surplus was mistakenly added to the physical bin.
+ * This shifts the surplus delta from the physical bin into UNALLOCATED,
+ * restoring the physical bin back to its true pre-reconciliation count.
+ */
+export async function rebalanceAppliedSingleBinSurplus(
+  onProgress?: (done: number, total: number) => void
+): Promise<{
+  rebalancedCount: number;
+  failedCount: number;
+  totalQuantityShifted: number;
+}> {
+  const appliedReviews = await getAppliedSingleBinReviews();
+  const surplusReviews = appliedReviews.filter((r) => r.difference > 0);
+
+  let rebalancedCount = 0;
+  let failedCount = 0;
+  let totalQuantityShifted = 0;
+
+  for (let i = 0; i < surplusReviews.length; i++) {
+    const review = surplusReviews[i];
+    const diff = review.difference; // extra quantity that should be in UNALLOCATED
+
+    try {
+      const match =
+        review.applied_remarks?.match(/Single-Bin Strategy:\s*([^)]+)/i) ||
+        review.applied_remarks?.match(/single bin \(([^)]+)\)/i) ||
+        review.applied_remarks?.match(/single location ([^\s]+)/i);
+
+      let targetLoc = match ? match[1].trim() : null;
+      const allocs = await getAllocations(review.material_code);
+
+      if (!targetLoc) {
+        const phys = allocs.find(
+          (a) => a.location_code !== UNALLOCATED_LOCATION && a.quantity > 0
+        );
+        targetLoc = phys ? phys.location_code : UNALLOCATED_LOCATION;
+      }
+
+      // If targetLoc is a physical bin, restore it to app_total and put diff into UNALLOCATED
+      if (targetLoc !== UNALLOCATED_LOCATION) {
+        const currentUnalloc =
+          allocs.find((a) => a.location_code === UNALLOCATED_LOCATION)
+            ?.quantity ?? 0;
+        const newUnalloc = currentUnalloc + diff;
+
+        // Restore physical bin to pre-reconciled count (review.app_total)
+        await applyAdjustment(
+          review.material_code,
+          targetLoc,
+          review.app_total,
+          "SAP Reconciliation",
+          `Rebalance Single-Bin: physical bin ${targetLoc} restored to physical count ${review.app_total}`
+        );
+
+        // Put extra quantity into UNALLOCATED
+        await applyAdjustment(
+          review.material_code,
+          UNALLOCATED_LOCATION,
+          newUnalloc,
+          "SAP Reconciliation",
+          `Rebalance Single-Bin: +${diff} extra SAP stock shifted to UNALLOCATED buffer`
+        );
+
+        // Update review remarks
+        await supabase
+          .from("stock_reconciliation_reviews")
+          .update({
+            applied_remarks: `Auto-reconciled (Single-Bin: ${targetLoc} kept at ${review.app_total}; +${diff} surplus shifted to UNALLOCATED)`,
+          })
+          .eq("id", review.id);
+
+        totalQuantityShifted += diff;
+        rebalancedCount++;
+      }
+    } catch (err) {
+      console.error(`Failed to rebalance review ${review.id}:`, err);
+      failedCount++;
+    }
+    onProgress?.(i + 1, surplusReviews.length);
+  }
+
+  return { rebalancedCount, failedCount, totalQuantityShifted };
 }
 
 /**
