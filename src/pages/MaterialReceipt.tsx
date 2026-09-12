@@ -2661,20 +2661,9 @@ export default function MaterialReceipt() {
                     <Inventory2Icon fontSize="small" sx={{ color: "primary.main" }} />
                     <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>PACKAGE DETAILS / MATERIALS</Typography>
                   </Box>
-                  <Box sx={{ display: "flex", gap: 0.75 }}>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      startIcon={<SyncIcon fontSize="small" />}
-                      onClick={handleOpenSapLookupForForm}
-                      sx={{ fontWeight: 600, textTransform: "none", py: 0.25, px: 1, borderRadius: 1.5, fontSize: "0.75rem" }}
-                    >
-                      Fetch SAP 103
-                    </Button>
-                    <Button size="small" startIcon={<AddIcon fontSize="small" />} onClick={addPackageRow} sx={{ fontWeight: 600, textTransform: "none" }}>
-                      Add Row
-                    </Button>
-                  </Box>
+                  <Button size="small" startIcon={<AddIcon fontSize="small" />} onClick={addPackageRow} sx={{ fontWeight: 600, textTransform: "none" }}>
+                    Add Row
+                  </Button>
                 </Box>
                 <Box sx={{ p: 1.5, display: "flex", flexDirection: "column", gap: 1 }}>
                   {form.package_details.map((row, index) => (
