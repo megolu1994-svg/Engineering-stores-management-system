@@ -66,7 +66,6 @@ import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import TaskAltOutlinedIcon from "@mui/icons-material/TaskAltOutlined";
 import ReportProblemIcon from "@mui/icons-material/ReportProblem";
-import CommentIcon from "@mui/icons-material/Comment";
 import BusinessIcon from "@mui/icons-material/Business";
 import LocalShippingIcon from "@mui/icons-material/LocalShipping";
 import LocalOfferIcon from "@mui/icons-material/LocalOffer";
@@ -209,7 +208,6 @@ function formatDateTime(value: string): string {
  */
 function DrcStatusChip({
   receipt,
-  showRemarks = true,
 }: {
   receipt: ReceiptHeader;
   showRemarks?: boolean;
@@ -225,29 +223,30 @@ function DrcStatusChip({
     iconNode = <TaskAltIcon sx={{ fontSize: "14px !important" }} />;
   }
 
+  const chipElement = (
+    <Chip
+      size="small"
+      label={statusInfo.label}
+      icon={iconNode}
+      sx={{
+        fontWeight: 700,
+        fontSize: "0.75rem",
+        bgcolor: statusInfo.chipBg,
+        color: statusInfo.chipColor,
+        border: `1px solid ${statusInfo.chipBorder}`,
+        "& .MuiChip-icon": { color: "inherit", ml: 0.5 },
+      }}
+    />
+  );
+
   return (
     <Box
       sx={{
         display: "inline-flex",
-        flexDirection: "column",
-        gap: 0.5,
-        alignItems: "flex-start",
+        alignItems: "center",
       }}
     >
-      <Chip
-        size="small"
-        label={statusInfo.label}
-        icon={iconNode}
-        sx={{
-          fontWeight: 700,
-          fontSize: "0.75rem",
-          bgcolor: statusInfo.chipBg,
-          color: statusInfo.chipColor,
-          border: `1px solid ${statusInfo.chipBorder}`,
-          "& .MuiChip-icon": { color: "inherit", ml: 0.5 },
-        }}
-      />
-      {showRemarks && statusInfo.remarks && (
+      {statusInfo.remarks ? (
         <Tooltip
           title={
             <Box sx={{ p: 0.5, maxWidth: 320 }}>
@@ -269,35 +268,10 @@ function DrcStatusChip({
           arrow
           placement="top"
         >
-          <Box
-            sx={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 0.5,
-              color: statusInfo.key === "on_hold" ? "#b91c1c" : "text.secondary",
-              fontWeight: statusInfo.key === "on_hold" ? 700 : 500,
-              fontSize: "0.72rem",
-              maxWidth: { xs: 180, md: 220 },
-              bgcolor: statusInfo.key === "on_hold" ? "#fee2e2" : "#f1f5f9",
-              px: 0.75,
-              py: 0.25,
-              borderRadius: 1,
-              border: "1px dashed",
-              borderColor: statusInfo.key === "on_hold" ? "#fca5a5" : "#cbd5e1",
-              cursor: "pointer",
-            }}
-          >
-            <CommentIcon sx={{ fontSize: 13, flexShrink: 0 }} />
-            <Typography
-              variant="caption"
-              component="span"
-              noWrap
-              sx={{ fontSize: "inherit", fontWeight: "inherit", color: "inherit" }}
-            >
-              {statusInfo.remarks}
-            </Typography>
-          </Box>
+          {chipElement}
         </Tooltip>
+      ) : (
+        chipElement
       )}
     </Box>
   );
@@ -1104,7 +1078,7 @@ export default function MaterialReceipt() {
 
   // Open SAP Lookup for an existing DRC (view or table)
   function handleOpenSapLookupForReceipt(receipt: ReceiptHeader) {
-    setSapLookupInitialPo(receipt.sap_po_number || "");
+    setSapLookupInitialPo(receipt.sap_po_number || receipt.po_number || "");
     setSapLookupInitialInv(receipt.invoice_number || "");
     setSapLookupTargetReceipt(receipt);
     setSapLookupModalOpen(true);
@@ -2494,7 +2468,7 @@ export default function MaterialReceipt() {
                       </TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>{r.drc_number}</TableCell>
                       <TableCell>{r.vendor_name}</TableCell>
-                      <TableCell>{r.po_number ?? "-"}</TableCell>
+                      <TableCell>{r.sap_po_number || r.po_number || "-"}</TableCell>
                       <TableCell>{r.invoice_number ?? "-"}</TableCell>
                       <TableCell>{r.vehicle_number ?? "-"}</TableCell>
                       <TableCell>{formatDate(r.receipt_datetime)}</TableCell>

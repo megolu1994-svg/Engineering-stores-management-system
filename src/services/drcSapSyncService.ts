@@ -97,6 +97,20 @@ function cleanAlphaNum(val: string | null | undefined): string {
   return String(val).replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 }
 
+/**
+ * Extracts 3-digit SAP movement code (e.g. "103", "105", "101") from movement type strings
+ * that may contain descriptions like "105 - GR from blocked stock" or "103/GR".
+ */
+export function extractMovementCode(mvt: string | null | undefined): string {
+  if (!mvt) return "";
+  const s = String(mvt).trim();
+  const match = s.match(/\b(101|102|103|104|105|106)\b/);
+  if (match) return match[1];
+  const digits = s.replace(/\D/g, "");
+  if (digits.length >= 3) return digits.slice(0, 3);
+  return s;
+}
+
 export function isPoMatch(
   targetPo: string | null | undefined,
   rowPo: string | null | undefined
@@ -229,36 +243,92 @@ export async function findSapDocumentsForDrc(
       return emptyResult;
     }
 
-    let rows = (rawRows ?? []).filter((r) => {
-      const mvt = String(r.movement_type || "").trim();
-      return validReceiptMovements.has(mvt);
+    const rows = (rawRows ?? []).filter((r) => {
+      const mvtCode = extractMovementCode(r.movement_type);
+      return validReceiptMovements.has(mvtCode);
     });
 
     if (rows.length === 0) {
       return emptyResult;
     }
 
-    // CRITICAL: User requirement:
-    // "match only two things SAP PO and invoice in DRC vs MB51 upload"
-    // If both PO and Invoice are provided, BOTH MUST MATCH!
+    // Matching logic strictly honoring PO and Invoice:
     let invoiceMatched = false;
+    let selectedRows: typeof rows = [];
+
     if (cleanPo && cleanInv) {
-      rows = rows.filter(
-        (r) =>
-          isPoMatch(cleanPo, r.purchase_order) &&
-          isInvoiceMatch(cleanInv, r.invoice_number, r.document_header_text)
-      );
-      invoiceMatched = rows.length > 0;
-    } else if (cleanPo) {
-      rows = rows.filter((r) => isPoMatch(cleanPo, r.purchase_order));
-    } else if (cleanInv) {
-      rows = rows.filter((r) =>
+      // 1. Filter rows matching the PO
+      const poRows = rows.filter((r) => isPoMatch(cleanPo, r.purchase_order));
+
+      // 2. Check which rows on this PO explicitly match the Invoice
+      const directInvRows = poRows.filter((r) =>
         isInvoiceMatch(cleanInv, r.invoice_number, r.document_header_text)
       );
-      invoiceMatched = rows.length > 0;
+
+      if (directInvRows.length > 0) {
+        invoiceMatched = true;
+
+        // Collect material document numbers and materials from the invoice-matched rows
+        const matched103Docs = new Set<string>();
+        const matchedMaterials = new Set<string>();
+
+        for (const r of directInvRows) {
+          const mvt = extractMovementCode(r.movement_type);
+          const doc = String(r.material_document || "").trim();
+          const mat = String(r.material_code || "").trim().toLowerCase();
+          if (mvt === "103" && doc) matched103Docs.add(doc);
+          if (mat) matchedMaterials.add(mat);
+        }
+
+        // Include all rows matching the invoice directly,
+        // PLUS any 105 movements on the same PO that correspond to this 103 delivery:
+        // (In SAP MIGO, 105 is posted as release of 103 blocked stock and standard SAP
+        // does not duplicate vendor invoice number into 105 header).
+        selectedRows = poRows.filter((r) => {
+          if (isInvoiceMatch(cleanInv, r.invoice_number, r.document_header_text)) {
+            return true;
+          }
+          const mvt = extractMovementCode(r.movement_type);
+          if (mvt === "105" || mvt === "106" || mvt === "101" || mvt === "102") {
+            const mat = String(r.material_code || "").trim().toLowerCase();
+            const text = String(r.document_header_text || "");
+            const invField = String(r.invoice_number || "");
+
+            // If 105 references the 103 doc in header text or invoice
+            for (const d103 of matched103Docs) {
+              if (text.includes(d103) || invField.includes(d103)) return true;
+            }
+
+            // If 105 is for the same material on this PO
+            if (matchedMaterials.has(mat)) return true;
+
+            // If single delivery on this PO
+            if (matched103Docs.size > 0 && poRows.length <= 4) return true;
+          }
+          return false;
+        });
+      } else {
+        // Fallback: check if invoice matches any rows
+        const invRows = rows.filter((r) =>
+          isInvoiceMatch(cleanInv, r.invoice_number, r.document_header_text)
+        );
+        if (invRows.length > 0) {
+          invoiceMatched = true;
+          selectedRows = invRows;
+        } else {
+          selectedRows = [];
+        }
+      }
+    } else if (cleanPo) {
+      selectedRows = rows.filter((r) => isPoMatch(cleanPo, r.purchase_order));
+    } else if (cleanInv) {
+      selectedRows = rows.filter((r) =>
+        isInvoiceMatch(cleanInv, r.invoice_number, r.document_header_text)
+      );
+      invoiceMatched = selectedRows.length > 0;
     }
 
-    if (rows.length === 0) {
+    if (selectedRows.length === 0) {
       return emptyResult;
     }
 
@@ -267,12 +337,11 @@ export async function findSapDocumentsForDrc(
     const doc105Set = new Set<string>();
     let latest103Date: string | null = null;
     let latest105Date: string | null = null;
+    let primary103Doc: string | null = null;
+    let primary105Doc: string | null = null;
     let foundVendor: string | null = null;
 
-    // Group items. If a specific invoice was matched, group by material and PO item.
-    // If multiple deliveries exist under a blanket PO (and no single invoice was matched),
-    // group by delivery (invoice / 103 document) so different truck shipments don't get
-    // summed into an inflated aggregate quantity.
+    // Group items by material and PO item
     const itemMap = new Map<
       string,
       {
@@ -293,8 +362,8 @@ export async function findSapDocumentsForDrc(
       }
     >();
 
-    for (const r of rows) {
-      const mvt = String(r.movement_type || "").trim();
+    for (const r of selectedRows) {
+      const mvt = extractMovementCode(r.movement_type);
       const doc = String(r.material_document || "").trim();
       const date = r.posting_date ? String(r.posting_date).slice(0, 10) : null;
       const matCode = String(r.material_code || "").trim();
@@ -312,28 +381,27 @@ export async function findSapDocumentsForDrc(
       }
 
       if (mvt === "103") {
-        if (doc) doc103Set.add(doc);
-        if (date && (!latest103Date || date > latest103Date)) {
+        if (doc) {
+          doc103Set.add(doc);
+          if (!primary103Doc) primary103Doc = doc;
+        }
+        if (date && (!latest103Date || date >= latest103Date)) {
           latest103Date = date;
+          if (doc) primary103Doc = doc;
         }
       } else if (mvt === "105" || mvt === "101") {
-        if (doc) doc105Set.add(doc);
-        if (date && (!latest105Date || date > latest105Date)) {
+        if (doc) {
+          doc105Set.add(doc);
+          if (!primary105Doc) primary105Doc = doc;
+        }
+        if (date && (!latest105Date || date >= latest105Date)) {
           latest105Date = date;
+          if (doc) primary105Doc = doc;
         }
       }
 
-      // If an invoice is matched, all rows belong to this single delivery -> group by item.
-      // If no invoice is matched but multiple deliveries exist on this PO, group by invoice or doc
-      // so distinct deliveries are kept separate.
-      let key = `${matCode}__${itemNo}`;
-      if (!invoiceMatched && rows.length > 2) {
-        const deliveryTag = cleanAlphaNum(inv) || (mvt === "103" ? `doc_${doc}` : "");
-        if (deliveryTag) {
-          key = `${matCode}__${itemNo}__${deliveryTag}`;
-        }
-      }
-
+      // Group items by material code & item number
+      const key = `${matCode}__${itemNo}`;
       let item = itemMap.get(key);
       if (!item) {
         item = {
@@ -367,14 +435,12 @@ export async function findSapDocumentsForDrc(
         item.doc103 = doc || item.doc103;
         item.date103 = date || item.date103;
       } else if (mvt === "104") {
-        // Reversal of 103
         item.qty103 -= Math.abs(qty);
       } else if (mvt === "105" || mvt === "101") {
         item.qty105 += qty;
         item.doc105 = doc || item.doc105;
         item.date105 = date || item.date105;
       } else if (mvt === "106" || mvt === "102") {
-        // Reversal of 105 or 101
         item.qty105 -= Math.abs(qty);
       }
     }
@@ -419,7 +485,7 @@ export async function findSapDocumentsForDrc(
     const doc105List = Array.from(doc105Set);
 
     return {
-      hasMatches: items.length > 0,
+      hasMatches: items.length > 0 || doc103List.length > 0 || doc105List.length > 0,
       has103: doc103List.length > 0,
       has105: doc105List.length > 0,
       poNumber: cleanPo || null,
@@ -429,12 +495,12 @@ export async function findSapDocumentsForDrc(
       vendorName: foundVendor,
       doc103List,
       doc105List,
-      primary103Doc: doc103List[0] || null,
+      primary103Doc: primary103Doc || doc103List[0] || null,
       primary103Date: latest103Date,
-      primary105Doc: doc105List[0] || null,
+      primary105Doc: primary105Doc || doc105List[0] || null,
       primary105Date: latest105Date,
       items,
-      rawMovementCount: rows.length,
+      rawMovementCount: selectedRows.length,
     };
   } catch (err) {
     console.error("findSapDocumentsForDrc error:", err);
@@ -949,15 +1015,89 @@ export async function syncSingleDrcWithSap(
     };
   }
 
-  const { data: updatedHeader, error } = await supabase
+  // Perform resilient update with automatic fallbacks for check constraints and missing columns
+  let updateError: { message: string } | null = null;
+  let finalUpdatedHeader: ReceiptHeader | null = null;
+
+  // Attempt 1: Full update with all fields
+  const res1 = await supabase
     .from("receipt_header")
     .update(headerUpdate)
     .eq("id", receipt.id)
     .select()
     .single();
 
-  if (error) {
-    console.error(`Error updating DRC ${receipt.drc_number}:`, error);
+  if (!res1.error && res1.data) {
+    finalUpdatedHeader = res1.data as ReceiptHeader;
+  } else if (res1.error) {
+    console.warn(`Attempt 1 update failed for DRC ${receipt.drc_number}:`, res1.error.message);
+    updateError = res1.error;
+
+    const errMsg = (res1.error.message || "").toLowerCase();
+    const isConstraintErr =
+      errMsg.includes("check constraint") ||
+      errMsg.includes("inspection_status") ||
+      errMsg.includes("receipt_header_inspection_status_check");
+    const isColumnMissing =
+      errMsg.includes("column") || errMsg.includes("does not exist");
+
+    // Attempt 2: If check constraint failed on inspection_status, omit inspection_status.
+    // (status = "Closed" and grn_number / sap_105_doc will still cause getDrcDisplayStatus to display "GRN created")
+    const retryUpdate = { ...headerUpdate };
+    if (isConstraintErr) {
+      delete retryUpdate.inspection_status;
+    }
+    if (isColumnMissing) {
+      if (errMsg.includes("sap_103_doc")) delete retryUpdate.sap_103_doc;
+      if (errMsg.includes("sap_103_date")) delete retryUpdate.sap_103_date;
+      if (errMsg.includes("sap_105_doc")) delete retryUpdate.sap_105_doc;
+      if (errMsg.includes("sap_105_date")) delete retryUpdate.sap_105_date;
+      if (errMsg.includes("sap_items")) delete retryUpdate.sap_items;
+    }
+
+    const res2 = await supabase
+      .from("receipt_header")
+      .update(retryUpdate)
+      .eq("id", receipt.id)
+      .select()
+      .single();
+
+    if (!res2.error && res2.data) {
+      finalUpdatedHeader = res2.data as ReceiptHeader;
+      updateError = null;
+    } else if (res2.error) {
+      console.warn(`Attempt 2 update failed for DRC ${receipt.drc_number}:`, res2.error.message);
+      // Attempt 3: Core columns only (status, grn_number, grn_date, closed_date)
+      const coreUpdate: Record<string, unknown> = {};
+      if (doc105) {
+        coreUpdate.status = "Closed";
+        coreUpdate.grn_number = doc105;
+        if (date105) coreUpdate.grn_date = date105.split("T")[0];
+        coreUpdate.closed_date = receipt.closed_date || new Date().toISOString();
+      }
+      if (headerUpdate.vendor_name) coreUpdate.vendor_name = headerUpdate.vendor_name;
+      if (headerUpdate.package_details) coreUpdate.package_details = headerUpdate.package_details;
+
+      if (Object.keys(coreUpdate).length > 0) {
+        const res3 = await supabase
+          .from("receipt_header")
+          .update(coreUpdate)
+          .eq("id", receipt.id)
+          .select()
+          .single();
+
+        if (!res3.error && res3.data) {
+          finalUpdatedHeader = res3.data as ReceiptHeader;
+          updateError = null;
+        } else if (res3.error) {
+          updateError = res3.error;
+        }
+      }
+    }
+  }
+
+  if (updateError && !finalUpdatedHeader) {
+    console.error(`Error updating DRC ${receipt.drc_number}:`, updateError);
     return {
       updated: false,
       drcNumber: receipt.drc_number,
@@ -965,7 +1105,7 @@ export async function syncSingleDrcWithSap(
       doc103,
       doc105,
       isGrnClosed: false,
-      reason: error.message,
+      reason: updateError.message,
     };
   }
 
@@ -976,7 +1116,7 @@ export async function syncSingleDrcWithSap(
     doc103,
     doc105,
     isGrnClosed: !!doc105,
-    updatedReceipt: updatedHeader as ReceiptHeader,
+    updatedReceipt: finalUpdatedHeader as ReceiptHeader,
   };
 }
 

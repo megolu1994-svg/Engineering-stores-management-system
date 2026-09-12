@@ -864,19 +864,21 @@ export function getDrcDisplayStatus(receipt: {
   package_details?: PackageDetailRow[] | null;
 }): DrcDisplayStatusInfo {
   const rawStatus = (receipt.inspection_status || "").trim().toLowerCase();
+  const rawHeaderStatus = String(receipt.status || "").trim().toLowerCase();
   const rawRemarks = (receipt.inspection_remarks || "").toLowerCase();
 
   // 3. Post-105: "GRN created" in Green - at this point the DRC is closed or complete
   const has105Grn =
-    receipt.status === "Closed" ||
-    receipt.status === "GRN created" ||
+    rawHeaderStatus === "closed" ||
+    rawHeaderStatus === "grn created" ||
     rawStatus === "grn created" ||
-    Boolean(receipt.grn_number && receipt.grn_number.trim() !== "") ||
-    Boolean(receipt.sap_105_doc && receipt.sap_105_doc.trim() !== "") ||
+    rawStatus === "closed" ||
+    Boolean(receipt.grn_number && String(receipt.grn_number).trim() !== "") ||
+    Boolean(receipt.sap_105_doc && String(receipt.sap_105_doc).trim() !== "") ||
     Boolean(
       receipt.package_details &&
         receipt.package_details.some(
-          (p) => Boolean(p.sap_105_doc && p.sap_105_doc.trim())
+          (p) => Boolean(p.sap_105_doc && String(p.sap_105_doc).trim())
         )
     );
 
