@@ -210,28 +210,37 @@ export async function findSapDocumentsForDrc(
     const validReceiptMovements = new Set(["103", "104", "105", "106", "101", "102"]);
 
     // Build targeted query conditions
-    // CRITICAL: If PO is provided, query by PO ONLY so we NEVER pull in
-    // unrelated POs that coincidentally share a simple invoice number.
+    // Query by PO and/or Invoice so that GeM orders or DRCs with GeM contract numbers
+    // (e.g. GEMC-...) can match their SAP MB51 movements via the invoice number,
+    // while standard SAP POs match via purchase_order.
+    const filterClauses: string[] = [];
+
     if (cleanPo) {
-      const poFilters = [`purchase_order.eq.${cleanPo}`];
+      filterClauses.push(`purchase_order.eq.${cleanPo}`);
       if (poNorm && poNorm !== cleanPo) {
-        poFilters.push(`purchase_order.eq.${poNorm}`);
+        filterClauses.push(`purchase_order.eq.${poNorm}`);
       }
       if (/^\d+$/.test(cleanPo) && cleanPo.length < 10) {
-        poFilters.push(`purchase_order.eq.${cleanPo.padStart(10, "0")}`);
+        filterClauses.push(`purchase_order.eq.${cleanPo.padStart(10, "0")}`);
       }
-      query = query.or(poFilters.join(","));
-    } else if (cleanInv) {
-      // Only when PO is not provided, query by invoice
-      const invFilters = [
-        `invoice_number.eq.${cleanInv}`,
-        `invoice_number.ilike.%${cleanInv}%`,
-        `document_header_text.ilike.%${cleanInv}%`,
-      ];
+      // If cleanPo contains GeM order prefix, also search in document_header_text or purchase_order
+      if (/gem/i.test(cleanPo)) {
+        filterClauses.push(`document_header_text.ilike.%${cleanPo}%`);
+        filterClauses.push(`purchase_order.ilike.%${cleanPo}%`);
+      }
+    }
+
+    if (cleanInv) {
+      filterClauses.push(`invoice_number.eq.${cleanInv}`);
+      filterClauses.push(`invoice_number.ilike.%${cleanInv}%`);
+      filterClauses.push(`document_header_text.ilike.%${cleanInv}%`);
       if (invNorm && invNorm !== cleanInv) {
-        invFilters.push(`invoice_number.eq.${invNorm}`);
+        filterClauses.push(`invoice_number.eq.${invNorm}`);
       }
-      query = query.or(invFilters.join(","));
+    }
+
+    if (filterClauses.length > 0) {
+      query = query.or(filterClauses.join(","));
     }
 
     const { data: rawRows, error } = await query
@@ -256,8 +265,89 @@ export async function findSapDocumentsForDrc(
     let invoiceMatched = false;
     let selectedRows: typeof rows = [];
 
+    // Helper to enrich matched rows with corresponding 105 movements on the same SAP PO
+    const enrichWithPoMovements = async (
+      matchedDirectRows: typeof rows,
+      targetPo?: string | null
+    ): Promise<typeof rows> => {
+      const matched103Docs = new Set<string>();
+      const matchedMaterials = new Set<string>();
+
+      for (const r of matchedDirectRows) {
+        const mvt = extractMovementCode(r.movement_type);
+        const doc = String(r.material_document || "").trim();
+        const mat = String(r.material_code || "").trim().toLowerCase();
+        if (mvt === "103" && doc) matched103Docs.add(doc);
+        if (mat) matchedMaterials.add(mat);
+      }
+
+      // Check if we need to query additional movements for this PO from the database
+      let poolOfPoRows = rows.filter(
+        (r) => targetPo && isPoMatch(targetPo, r.purchase_order)
+      );
+
+      const has105InPool = poolOfPoRows.some((r) => {
+        const m = extractMovementCode(r.movement_type);
+        return m === "105" || m === "101";
+      });
+
+      if (!has105InPool && targetPo) {
+        try {
+          const { data: morePoRows } = await supabase
+            .from("sap_material_documents")
+            .select("*")
+            .eq("purchase_order", targetPo)
+            .order("posting_date", { ascending: true });
+          if (morePoRows && morePoRows.length > 0) {
+            const validMore = morePoRows.filter((r) =>
+              validReceiptMovements.has(extractMovementCode(r.movement_type))
+            );
+            poolOfPoRows = [...poolOfPoRows, ...validMore];
+          }
+        } catch (e) {
+          console.warn("Could not query additional PO movements:", e);
+        }
+      }
+
+      const combinedMap = new Map<string, (typeof rows)[0]>();
+      matchedDirectRows.forEach((r) =>
+        combinedMap.set(`${r.id}_${r.material_document}`, r)
+      );
+
+      for (const r of poolOfPoRows) {
+        const mvt = extractMovementCode(r.movement_type);
+        if (mvt === "105" || mvt === "106" || mvt === "101" || mvt === "102") {
+          const mat = String(r.material_code || "").trim().toLowerCase();
+          const text = String(r.document_header_text || "");
+          const invField = String(r.invoice_number || "");
+
+          let matchesThisDelivery = false;
+          if (cleanInv && isInvoiceMatch(cleanInv, r.invoice_number, r.document_header_text)) {
+            matchesThisDelivery = true;
+          }
+          for (const d103 of matched103Docs) {
+            if (text.includes(d103) || invField.includes(d103)) {
+              matchesThisDelivery = true;
+            }
+          }
+          if (matchedMaterials.has(mat)) {
+            matchesThisDelivery = true;
+          }
+          if (matched103Docs.size > 0 && poolOfPoRows.length <= 6) {
+            matchesThisDelivery = true;
+          }
+
+          if (matchesThisDelivery) {
+            combinedMap.set(`${r.id}_${r.material_document}`, r);
+          }
+        }
+      }
+
+      return Array.from(combinedMap.values());
+    };
+
     if (cleanPo && cleanInv) {
-      // 1. Filter rows matching the PO
+      // 1. Filter rows matching the PO directly
       const poRows = rows.filter((r) => isPoMatch(cleanPo, r.purchase_order));
 
       // 2. Check which rows on this PO explicitly match the Invoice
@@ -267,54 +357,20 @@ export async function findSapDocumentsForDrc(
 
       if (directInvRows.length > 0) {
         invoiceMatched = true;
-
-        // Collect material document numbers and materials from the invoice-matched rows
-        const matched103Docs = new Set<string>();
-        const matchedMaterials = new Set<string>();
-
-        for (const r of directInvRows) {
-          const mvt = extractMovementCode(r.movement_type);
-          const doc = String(r.material_document || "").trim();
-          const mat = String(r.material_code || "").trim().toLowerCase();
-          if (mvt === "103" && doc) matched103Docs.add(doc);
-          if (mat) matchedMaterials.add(mat);
-        }
-
-        // Include all rows matching the invoice directly,
-        // PLUS any 105 movements on the same PO that correspond to this 103 delivery:
-        // (In SAP MIGO, 105 is posted as release of 103 blocked stock and standard SAP
-        // does not duplicate vendor invoice number into 105 header).
-        selectedRows = poRows.filter((r) => {
-          if (isInvoiceMatch(cleanInv, r.invoice_number, r.document_header_text)) {
-            return true;
-          }
-          const mvt = extractMovementCode(r.movement_type);
-          if (mvt === "105" || mvt === "106" || mvt === "101" || mvt === "102") {
-            const mat = String(r.material_code || "").trim().toLowerCase();
-            const text = String(r.document_header_text || "");
-            const invField = String(r.invoice_number || "");
-
-            // If 105 references the 103 doc in header text or invoice
-            for (const d103 of matched103Docs) {
-              if (text.includes(d103) || invField.includes(d103)) return true;
-            }
-
-            // If 105 is for the same material on this PO
-            if (matchedMaterials.has(mat)) return true;
-
-            // If single delivery on this PO
-            if (matched103Docs.size > 0 && poRows.length <= 4) return true;
-          }
-          return false;
-        });
+        selectedRows = await enrichWithPoMovements(directInvRows, cleanPo);
       } else {
-        // Fallback: check if invoice matches any rows
+        // Fallback: check if invoice matches any rows across the entire MB51 history
+        // (Handles GeM orders where DRC recorded GeM contract number, but SAP recorded internal SAP PO)
         const invRows = rows.filter((r) =>
           isInvoiceMatch(cleanInv, r.invoice_number, r.document_header_text)
         );
         if (invRows.length > 0) {
           invoiceMatched = true;
-          selectedRows = invRows;
+          const discoveredPo = invRows.find((r) => r.purchase_order)?.purchase_order;
+          selectedRows = await enrichWithPoMovements(invRows, discoveredPo);
+        } else if (poRows.length > 0) {
+          // If invoice didn't match anything, fall back to PO match
+          selectedRows = poRows;
         } else {
           selectedRows = [];
         }
@@ -322,11 +378,18 @@ export async function findSapDocumentsForDrc(
     } else if (cleanPo) {
       selectedRows = rows.filter((r) => isPoMatch(cleanPo, r.purchase_order));
     } else if (cleanInv) {
-      selectedRows = rows.filter((r) =>
+      const invRows = rows.filter((r) =>
         isInvoiceMatch(cleanInv, r.invoice_number, r.document_header_text)
       );
-      invoiceMatched = selectedRows.length > 0;
+      if (invRows.length > 0) {
+        invoiceMatched = true;
+        const discoveredPo = invRows.find((r) => r.purchase_order)?.purchase_order;
+        selectedRows = await enrichWithPoMovements(invRows, discoveredPo);
+      } else {
+        selectedRows = [];
+      }
     }
+
 
     if (selectedRows.length === 0) {
       return emptyResult;
@@ -483,12 +546,14 @@ export async function findSapDocumentsForDrc(
 
     const doc103List = Array.from(doc103Set);
     const doc105List = Array.from(doc105Set);
+    const discoveredPo =
+      selectedRows.find((r) => r.purchase_order)?.purchase_order || cleanPo || null;
 
     return {
       hasMatches: items.length > 0 || doc103List.length > 0 || doc105List.length > 0,
       has103: doc103List.length > 0,
       has105: doc105List.length > 0,
-      poNumber: cleanPo || null,
+      poNumber: discoveredPo,
       invoiceNumber: cleanInv || null,
       searchedInvoice: cleanInv || null,
       invoiceMatched,
@@ -999,8 +1064,22 @@ export async function syncSingleDrcWithSap(
   ) {
     headerUpdate.vendor_name = lookupResult.vendorName;
   }
-  if (lookupResult.poNumber && !receipt.sap_po_number) {
-    headerUpdate.sap_po_number = lookupResult.poNumber;
+  if (lookupResult.poNumber) {
+    const currentSapPo = (receipt.sap_po_number || "").trim();
+    if (
+      !currentSapPo ||
+      /^gem/i.test(currentSapPo) ||
+      currentSapPo !== lookupResult.poNumber
+    ) {
+      headerUpdate.sap_po_number = lookupResult.poNumber;
+      if (
+        !receipt.gem_order_number &&
+        (/^gem/i.test(receipt.po_number || "") || /^gem/i.test(currentSapPo))
+      ) {
+        headerUpdate.gem_order_number =
+          receipt.gem_order_number || currentSapPo || receipt.po_number;
+      }
+    }
   }
 
   if (Object.keys(headerUpdate).length === 0) {

@@ -1117,14 +1117,25 @@ export default function MaterialReceipt() {
   ) {
     try {
       const convertedRows = convertSapItemsToPackageDetails(items);
+      const discoveredPo = lookupResult.poNumber || "";
+      const currentSapPo = (receipt.sap_po_number || "").trim();
+      const currentPo = (receipt.po_number || "").trim();
+      const shouldUpdateSapPo =
+        discoveredPo && (!currentSapPo || /^gem/i.test(currentSapPo) || currentSapPo !== discoveredPo);
+      const finalSapPo = shouldUpdateSapPo ? discoveredPo : (currentSapPo || discoveredPo);
+      const isCurrentPoGem = /^gem/i.test(currentPo) || /^gem/i.test(currentSapPo);
+      const finalGemOrder =
+        receipt.gem_order_number ||
+        (isCurrentPoGem ? (receipt.gem_order_number || currentSapPo || currentPo) : "");
+
       const updateData: ReceiptFormInput = {
         receipt_mode: receipt.receipt_mode || "Vehicle",
         vehicle_number: receipt.vehicle_number || "",
         package_details: convertedRows,
         vendor_name: receipt.vendor_name || lookupResult.vendorName || "Unknown Vendor",
-        sap_po_number: receipt.sap_po_number || lookupResult.poNumber || "",
+        sap_po_number: finalSapPo,
         sap_po_date: receipt.sap_po_date || lookupResult.primary103Date || "",
-        gem_order_number: receipt.gem_order_number || "",
+        gem_order_number: finalGemOrder,
         gem_order_date: receipt.gem_order_date || "",
         invoice_number: receipt.invoice_number || lookupResult.invoiceNumber || "",
         invoice_date: receipt.invoice_date || "",
