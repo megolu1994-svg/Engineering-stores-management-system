@@ -1068,14 +1068,6 @@ export default function MaterialReceipt() {
     }
   }, [viewReceipt, checkSapForView]);
 
-  // Open SAP Lookup for Create/Edit DRC form
-  function handleOpenSapLookupForForm() {
-    setSapLookupInitialPo(form.sap_po_number);
-    setSapLookupInitialInv(form.invoice_number);
-    setSapLookupTargetReceipt(null);
-    setSapLookupModalOpen(true);
-  }
-
   // Open SAP Lookup for an existing DRC (view or table)
   function handleOpenSapLookupForReceipt(receipt: ReceiptHeader) {
     setSapLookupInitialPo(receipt.sap_po_number || receipt.po_number || "");
@@ -2695,20 +2687,9 @@ export default function MaterialReceipt() {
 
               {/* --- Purchase Details --- */}
               <Card elevation={0} sx={{ borderRadius: 2, border: "1px solid", borderColor: "divider" }}>
-                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", px: 1.5, py: 1, borderBottom: "1px solid", borderColor: "divider" }}>
-                  <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
-                    <LocalOfferIcon fontSize="small" sx={{ color: "primary.main" }} />
-                    <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>PURCHASE DETAILS</Typography>
-                  </Box>
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    startIcon={<SyncIcon fontSize="small" />}
-                    onClick={handleOpenSapLookupForForm}
-                    sx={{ fontWeight: 600, textTransform: "none", py: 0.25, px: 1, borderRadius: 1.5, fontSize: "0.75rem" }}
-                  >
-                    Fetch from SAP MB51
-                  </Button>
+                <Box sx={{ display: "flex", alignItems: "center", gap: 0.75, px: 1.5, py: 1, borderBottom: "1px solid", borderColor: "divider" }}>
+                  <LocalOfferIcon fontSize="small" sx={{ color: "primary.main" }} />
+                  <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>PURCHASE DETAILS</Typography>
                 </Box>
                 <Box sx={{ p: 1.5, display: "flex", flexDirection: "column", gap: 1.5 }}>
                   <TextField label="SAP PO Number" size="small" fullWidth value={form.sap_po_number} onChange={(e) => updateField("sap_po_number", e.target.value)} sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }} />
