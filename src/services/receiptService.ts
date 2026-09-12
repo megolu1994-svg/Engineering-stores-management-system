@@ -36,21 +36,28 @@ export const PACKAGE_TYPES: PackageType[] = [
   "Others",
 ];
 
-export type ReceiptStatus = "Pending Inspection" | "Pending GRN" | "Closed";
+export type ReceiptStatus =
+  | "Pending Inspection"
+  | "Pending GRN"
+  | "Closed"
+  | "GRN created";
 
 /**
  * Inspection outcomes. "Pending Inspection" is the initial state set at DRC
  * creation; the inspecting user then records exactly one of the two
  * outcomes below - "Inspection Cleared" moves the DRC forward to GRN,
  * "Inspection On Hold" keeps it open for re-inspection once the (mandatory)
- * remarks describing the hold reason are addressed.
+ * remarks describing the hold reason are addressed. Once 105 GR release is
+ * fetched/posted, status moves to "GRN created".
  */
 export type InspectionStatus =
   | "Pending Inspection"
+  | "Pending inspection"
   | "Inspection Cleared"
   | "Inspection On Hold"
   | "Inspection cleared"
-  | "Inspection on hold";
+  | "Inspection on hold"
+  | "GRN created";
 
 export interface PackageDetailRow {
   /** Free text - usually numeric, but may be a note like "Uncountable". */
@@ -586,6 +593,8 @@ export async function createReceipt(
 
   const payload: Record<string, unknown> = {
     ...buildPayload(input),
+    status: "Pending Inspection",
+    inspection_status: "Pending inspection",
     photo_urls: photoUrls,
     photo_paths: photoPaths,
     attachment_paths: attachmentPaths,
@@ -839,35 +848,51 @@ export interface DrcDisplayStatusInfo {
 
 /**
  * Resolves the 3-state inspection and lifecycle status of a DRC:
- * 1. Pending Inspection (freshly created DRC awaiting inspection)
+ * 1. Pending inspection (freshly created DRC awaiting inspection)
  * 2. Inspection on hold (with department hold comments/remarks)
  * 3. Inspection cleared (cleared by department with comments/remarks)
- * (and Closed once GRN is fully posted)
+ * 4. GRN created (Green) - once 105 GR release is fetched/posted, the DRC is closed/complete!
  */
 export function getDrcDisplayStatus(receipt: {
-  status: ReceiptStatus;
+  status: ReceiptStatus | string;
   inspection_status?: InspectionStatus | string | null;
   inspection_remarks?: string | null;
   inspection_by?: string | null;
   inspection_date?: string | null;
+  grn_number?: string | null;
+  sap_105_doc?: string | null;
+  package_details?: PackageDetailRow[] | null;
 }): DrcDisplayStatusInfo {
-  // Closed DRC (GRN completed)
-  if (receipt.status === "Closed") {
+  const rawStatus = (receipt.inspection_status || "").trim().toLowerCase();
+  const rawRemarks = (receipt.inspection_remarks || "").toLowerCase();
+
+  // 3. Post-105: "GRN created" in Green - at this point the DRC is closed or complete
+  const has105Grn =
+    receipt.status === "Closed" ||
+    receipt.status === "GRN created" ||
+    rawStatus === "grn created" ||
+    Boolean(receipt.grn_number && receipt.grn_number.trim() !== "") ||
+    Boolean(receipt.sap_105_doc && receipt.sap_105_doc.trim() !== "") ||
+    Boolean(
+      receipt.package_details &&
+        receipt.package_details.some(
+          (p) => Boolean(p.sap_105_doc && p.sap_105_doc.trim())
+        )
+    );
+
+  if (has105Grn) {
     return {
       key: "closed",
-      label: "Closed",
-      badgeColor: "default",
-      chipBg: "#f1f5f9",
-      chipColor: "#475569",
-      chipBorder: "#cbd5e1",
+      label: "GRN created",
+      badgeColor: "success",
+      chipBg: "#f0fdf4",
+      chipColor: "#16a34a",
+      chipBorder: "#86efac",
       remarks: receipt.inspection_remarks || null,
       inspectedBy: receipt.inspection_by || null,
       inspectionDate: receipt.inspection_date || null,
     };
   }
-
-  const rawStatus = (receipt.inspection_status || "").trim().toLowerCase();
-  const rawRemarks = (receipt.inspection_remarks || "").toLowerCase();
 
   // 2. Inspection on hold (with department remarks)
   if (
@@ -891,7 +916,7 @@ export function getDrcDisplayStatus(receipt: {
     };
   }
 
-  // 3. Inspection cleared (with department remarks)
+  // Inspection cleared (cleared by department, awaiting 105 GR release)
   if (
     rawStatus === "inspection cleared" ||
     rawStatus === "cleared" ||
@@ -914,10 +939,10 @@ export function getDrcDisplayStatus(receipt: {
     };
   }
 
-  // 1. Pending Inspection (just after creation of DRC)
+  // 1. Initial status: Pending inspection
   return {
     key: "pending",
-    label: "Pending Inspection",
+    label: "Pending inspection",
     badgeColor: "warning",
     chipBg: "#fffbeb",
     chipColor: "#d97706",
@@ -934,7 +959,7 @@ export function getDrcDisplayStatus(receipt: {
 export async function getReceiptSummary(): Promise<ReceiptSummary> {
   const { data, error } = await supabase
     .from("receipt_header")
-    .select("status, inspection_status");
+    .select("status, inspection_status, grn_number, sap_105_doc");
 
   if (error) {
     console.error(error);
@@ -949,8 +974,10 @@ export async function getReceiptSummary(): Promise<ReceiptSummary> {
   }
 
   const rows = (data ?? []) as {
-    status: ReceiptStatus;
+    status: ReceiptStatus | string;
     inspection_status: InspectionStatus | string | null;
+    grn_number?: string | null;
+    sap_105_doc?: string | null;
   }[];
 
   let pendingInspection = 0;
@@ -961,8 +988,14 @@ export async function getReceiptSummary(): Promise<ReceiptSummary> {
 
   for (const r of rows) {
     const rawStatus = (r.inspection_status || "").trim().toLowerCase();
+    const has105Grn =
+      r.status === "Closed" ||
+      r.status === "GRN created" ||
+      rawStatus === "grn created" ||
+      Boolean(r.grn_number && r.grn_number.trim() !== "") ||
+      Boolean(r.sap_105_doc && r.sap_105_doc.trim() !== "");
 
-    if (r.status === "Closed") {
+    if (has105Grn) {
       closed += 1;
     } else if (
       rawStatus === "inspection on hold" ||

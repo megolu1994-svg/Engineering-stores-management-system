@@ -1040,6 +1040,42 @@ export default function MaterialReceipt() {
         receipt.invoice_number
       );
       setViewSapLookup(res);
+
+      // If 105 GRN is found in MB51, or if receipt already has grn_number / 105 doc,
+      // ensure the database header has status "Closed" and inspection_status "GRN created"
+      const doc105 = res.primary105Doc || receipt.grn_number || receipt.sap_105_doc;
+      if (
+        doc105 &&
+        (receipt.status !== "Closed" ||
+          receipt.inspection_status !== "GRN created" ||
+          !receipt.grn_number ||
+          !receipt.sap_105_doc)
+      ) {
+        const dateToUse = res.primary105Date || receipt.grn_date || todayIso();
+        const { data: updatedHeader, error } = await supabase
+          .from("receipt_header")
+          .update({
+            grn_number: doc105,
+            grn_date: dateToUse,
+            sap_105_doc: doc105,
+            sap_105_date: dateToUse,
+            status: "Closed",
+            inspection_status: "GRN created",
+            closed_date: receipt.closed_date || new Date().toISOString(),
+          })
+          .eq("id", receipt.id)
+          .select()
+          .single();
+
+        if (!error && updatedHeader) {
+          setViewReceipt(updatedHeader as ReceiptHeader);
+          setReceipts((prev) =>
+            prev.map((r) =>
+              r.id === updatedHeader.id ? (updatedHeader as ReceiptHeader) : r
+            )
+          );
+        }
+      }
     } catch (err) {
       console.warn("checkSapForView error:", err);
       setViewSapLookup(null);
@@ -1152,10 +1188,53 @@ export default function MaterialReceipt() {
         [],
         receipt.attachment_paths || []
       );
-      setViewReceipt(updated);
+
+      // Link SAP 103 / 105 documents to receipt header
+      const doc103 =
+        lookupResult.primary103Doc ||
+        items.find((it) => it.sap_103_doc)?.sap_103_doc ||
+        null;
+      const doc103Date = lookupResult.primary103Date || null;
+      const doc105 =
+        lookupResult.primary105Doc ||
+        items.find((it) => it.sap_105_doc)?.sap_105_doc ||
+        null;
+      const doc105Date = lookupResult.primary105Date || null;
+
+      const headerUpdate: Record<string, unknown> = {};
+      if (doc103) {
+        headerUpdate.sap_103_doc = doc103;
+        if (doc103Date) headerUpdate.sap_103_date = doc103Date;
+      }
+      if (doc105) {
+        headerUpdate.sap_105_doc = doc105;
+        headerUpdate.grn_number = doc105;
+        if (doc105Date) {
+          headerUpdate.sap_105_date = doc105Date;
+          headerUpdate.grn_date = doc105Date.split("T")[0];
+        }
+        headerUpdate.status = "Closed";
+        headerUpdate.inspection_status = "GRN created";
+        headerUpdate.closed_date = new Date().toISOString();
+      }
+
+      let finalReceipt = updated;
+      if (Object.keys(headerUpdate).length > 0) {
+        const { data: updatedHeader } = await supabase
+          .from("receipt_header")
+          .update(headerUpdate)
+          .eq("id", receipt.id)
+          .select()
+          .single();
+        if (updatedHeader) {
+          finalReceipt = updatedHeader as ReceiptHeader;
+        }
+      }
+
+      setViewReceipt(finalReceipt);
       await refreshAll();
       showSnackbar(
-        `Linked ${items.length} material(s) from SAP MB51 to ${receipt.drc_number}.`,
+        `Linked ${items.length} material(s) from SAP MB51 to ${receipt.drc_number}.${doc105 ? " DRC marked GRN created." : ""}`,
         "success"
       );
     } catch (err) {
@@ -1210,7 +1289,7 @@ export default function MaterialReceipt() {
         receipt.attachment_paths || []
       );
 
-      // Also set grn_number directly
+      // Update 105 columns, mark status Closed and inspection_status "GRN created"
       const { data: updatedHeader, error } = await supabase
         .from("receipt_header")
         .update({
@@ -1218,6 +1297,9 @@ export default function MaterialReceipt() {
           grn_date: dateToUse,
           sap_105_doc: doc105,
           sap_105_date: dateToUse,
+          status: "Closed",
+          inspection_status: "GRN created",
+          closed_date: new Date().toISOString(),
         })
         .eq("id", receipt.id)
         .select()
@@ -1231,7 +1313,7 @@ export default function MaterialReceipt() {
       setViewReceipt(finalReceipt);
       await refreshAll();
       showSnackbar(
-        `Applied SAP 105 (${doc105}) as GRN Number for ${receipt.drc_number}.`,
+        `Applied SAP 105 (${doc105}) as GRN Number for ${receipt.drc_number}. Status updated to GRN created.`,
         "success"
       );
     } catch (err) {
@@ -1730,13 +1812,13 @@ export default function MaterialReceipt() {
     },
     {
       key: "closed" as const,
-      label: "Closed",
+      label: "GRN created",
       value: summary.closed,
       icon: <TaskAltIcon />,
-      color: "#475569",
-      bg: "#f1f5f9",
-      border: "#cbd5e1",
-      description: "GRN completed",
+      color: "#16a34a",
+      bg: "#f0fdf4",
+      border: "#86efac",
+      description: "105 GRN complete (Closed)",
     },
     {
       key: "all" as const,
@@ -1962,8 +2044,8 @@ export default function MaterialReceipt() {
               },
               {
                 key: "closed",
-                label: `Closed (${summary.closed})`,
-                color: "default",
+                label: `GRN created (${summary.closed})`,
+                color: "success",
               },
             ].map((pill) => (
               <Chip
@@ -2158,7 +2240,7 @@ export default function MaterialReceipt() {
                       {r.package_details && r.package_details.length > 0 && r.package_details.every((p) => p.bin_allocated) ? (
                         <Chip size="small" color="success" icon={<WarehouseIcon fontSize="small" />} label="Bins Done" sx={{ height: 20, fontSize: "0.65rem", fontWeight: 700 }} />
                       ) : r.sap_105_doc || r.grn_number ? (
-                        <Chip size="small" color="primary" variant="outlined" icon={<TaskAltIcon fontSize="small" />} label="105 GRN" sx={{ height: 20, fontSize: "0.65rem", fontWeight: 600 }} />
+                        <Chip size="small" color="success" variant="outlined" icon={<TaskAltIcon fontSize="small" />} label="105 GRN" sx={{ height: 20, fontSize: "0.65rem", fontWeight: 600 }} />
                       ) : r.sap_103_doc || (r.package_details && r.package_details.some((p) => p.material_code)) ? (
                         <Chip size="small" color="info" variant="outlined" icon={<SyncIcon fontSize="small" />} label="103 Synced" sx={{ height: 20, fontSize: "0.65rem", fontWeight: 600 }} />
                       ) : null}
@@ -2233,7 +2315,6 @@ export default function MaterialReceipt() {
                   <TableCell>Vehicle Number</TableCell>
                   <TableCell>Receipt Date</TableCell>
                   <TableCell>Status & Remarks</TableCell>
-                  <TableCell>SAP / Bins</TableCell>
                   <TableCell align="right">Actions</TableCell>
                 </TableRow>
               </TableHead>
@@ -2270,17 +2351,6 @@ export default function MaterialReceipt() {
                       <TableCell>{formatDate(r.receipt_datetime)}</TableCell>
                       <TableCell>
                         <DrcStatusChip receipt={r} />
-                      </TableCell>
-                      <TableCell>
-                        {r.package_details && r.package_details.length > 0 && r.package_details.every((p) => p.bin_allocated) ? (
-                          <Chip size="small" color="success" icon={<WarehouseIcon fontSize="small" />} label="Bins Done" sx={{ height: 22, fontSize: "0.68rem", fontWeight: 700 }} />
-                        ) : r.sap_105_doc || r.grn_number ? (
-                          <Chip size="small" color="primary" variant="outlined" icon={<TaskAltIcon fontSize="small" />} label="105 GRN" sx={{ height: 22, fontSize: "0.68rem", fontWeight: 600 }} />
-                        ) : r.sap_103_doc || (r.package_details && r.package_details.some((p) => p.material_code)) ? (
-                          <Chip size="small" color="info" variant="outlined" icon={<SyncIcon fontSize="small" />} label="103 Synced" sx={{ height: 22, fontSize: "0.68rem", fontWeight: 600 }} />
-                        ) : (
-                          <Typography variant="caption" color="text.secondary">-</Typography>
-                        )}
                       </TableCell>
                       <TableCell align="right" onClick={(e) => e.stopPropagation()}>
                         <Box sx={{ display: "flex", justifyContent: "flex-end", gap: 0.5 }}>
@@ -2895,13 +2965,25 @@ export default function MaterialReceipt() {
                           </Typography>
                           <Chip
                             size="small"
-                            color={viewReceipt.status === "Pending GRN" || viewReceipt.status === "Closed" ? "success" : "warning"}
-                            label={getDrcDisplayStatus(viewReceipt).label}
+                            color={
+                              viewReceipt.inspection_status?.toLowerCase().includes("hold")
+                                ? "error"
+                                : viewReceipt.inspection_status?.toLowerCase().includes("cleared") || viewReceipt.inspection_by || (viewReceipt.grn_number || viewReceipt.sap_105_doc)
+                                ? "success"
+                                : "warning"
+                            }
+                            label={
+                              viewReceipt.inspection_status?.toLowerCase().includes("hold")
+                                ? "Inspection on hold"
+                                : viewReceipt.inspection_status?.toLowerCase().includes("cleared") || viewReceipt.inspection_by || (viewReceipt.grn_number || viewReceipt.sap_105_doc)
+                                ? "Inspection cleared"
+                                : "Pending inspection"
+                            }
                             sx={{ height: 20, fontSize: "0.65rem", fontWeight: 700 }}
                           />
                         </Box>
                         <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                          {viewReceipt.inspection_by ? `By: ${viewReceipt.inspection_by}` : "Pending Inspection"}
+                          {viewReceipt.inspection_by ? `By: ${viewReceipt.inspection_by}` : (viewReceipt.grn_number || viewReceipt.sap_105_doc) ? "Cleared (105 Posted)" : "Pending inspection"}
                         </Typography>
                         <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
                           {viewReceipt.inspection_date ? formatDate(viewReceipt.inspection_date) : "Department check in progress"}
@@ -2979,19 +3061,19 @@ export default function MaterialReceipt() {
                       <Box>
                         <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.5 }}>
                           <Typography variant="caption" sx={{ fontWeight: 700, color: "primary.dark" }}>
-                            STEP 4: BIN LOCATION ALLOCATION
+                            STEP 4: BIN ALLOCATION (OPTIONAL)
                           </Typography>
                           {(viewReceipt.package_details && viewReceipt.package_details.length > 0 && viewReceipt.package_details.every((p) => p.bin_allocated)) ? (
                             <Chip size="small" color="success" label="All Bins Allocated" sx={{ height: 20, fontSize: "0.65rem", fontWeight: 700 }} />
                           ) : (
-                            <Chip size="small" color="warning" variant="outlined" label="Bins Pending" sx={{ height: 20, fontSize: "0.65rem" }} />
+                            <Chip size="small" color="default" variant="outlined" label="Optional / Unallocated" sx={{ height: 20, fontSize: "0.65rem" }} />
                           )}
                         </Box>
                         <Typography variant="body2" sx={{ fontWeight: 600 }}>
                           Status: {viewReceipt.package_details && viewReceipt.package_details.filter((p) => p.bin_allocated).length} of {viewReceipt.package_details?.length || 0} Allocated
                         </Typography>
                         <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                          Physical stock putaway in warehouse
+                          Physical stock putaway in warehouse (optional - can also be done via MB52 upload in Inventory module)
                         </Typography>
                       </Box>
 
@@ -3003,7 +3085,7 @@ export default function MaterialReceipt() {
                         onClick={() => handleOpenBinAllocation(viewReceipt)}
                         sx={{ textTransform: "none", fontWeight: 600, p: 0, mt: 1, justifyContent: "flex-start" }}
                       >
-                        Allocate Bins & Close DRC
+                        Allocate Bins (Optional)
                       </Button>
                     </Paper>
                   </Grid>

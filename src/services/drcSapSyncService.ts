@@ -686,6 +686,8 @@ export async function allocateDrcMaterialsToBins(
 
   if (doc105) {
     updatePayload.grn_number = doc105;
+    updatePayload.inspection_status = "GRN created";
+    updatePayload.status = "Closed";
   }
   if (doc105Date) {
     updatePayload.grn_date = doc105Date;
@@ -693,6 +695,7 @@ export async function allocateDrcMaterialsToBins(
 
   if (closeDrc) {
     updatePayload.status = "Closed";
+    updatePayload.inspection_status = "GRN created";
     updatePayload.closed_date = nowIso;
     updatePayload.closed_by = operatorName;
     result.drcClosed = true;
