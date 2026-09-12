@@ -97,7 +97,24 @@ function cleanAlphaNum(val: string | null | undefined): string {
   return String(val).replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 }
 
-function isInvoiceMatch(
+export function isPoMatch(
+  targetPo: string | null | undefined,
+  rowPo: string | null | undefined
+): boolean {
+  if (!targetPo || !rowPo) return false;
+  const tNorm = normalizeDocCode(targetPo).toLowerCase();
+  const rNorm = normalizeDocCode(rowPo).toLowerCase();
+  if (tNorm && rNorm && tNorm === rNorm) return true;
+  const tClean = String(targetPo).trim().toLowerCase();
+  const rClean = String(rowPo).trim().toLowerCase();
+  if (tClean === rClean) return true;
+  const tAlpha = cleanAlphaNum(targetPo);
+  const rAlpha = cleanAlphaNum(rowPo);
+  if (tAlpha && rAlpha && tAlpha === rAlpha) return true;
+  return false;
+}
+
+export function isInvoiceMatch(
   targetInvoice: string,
   rowInvoice: string | null | undefined,
   rowDocText: string | null | undefined
@@ -221,17 +238,28 @@ export async function findSapDocumentsForDrc(
       return emptyResult;
     }
 
-    // Check if an invoice was searched and matches within the records
+    // CRITICAL: User requirement:
+    // "match only two things SAP PO and invoice in DRC vs MB51 upload"
+    // If both PO and Invoice are provided, BOTH MUST MATCH!
     let invoiceMatched = false;
-    if (cleanInv && rows.length > 0) {
-      const matchingInvRows = rows.filter((r) =>
+    if (cleanPo && cleanInv) {
+      rows = rows.filter(
+        (r) =>
+          isPoMatch(cleanPo, r.purchase_order) &&
+          isInvoiceMatch(cleanInv, r.invoice_number, r.document_header_text)
+      );
+      invoiceMatched = rows.length > 0;
+    } else if (cleanPo) {
+      rows = rows.filter((r) => isPoMatch(cleanPo, r.purchase_order));
+    } else if (cleanInv) {
+      rows = rows.filter((r) =>
         isInvoiceMatch(cleanInv, r.invoice_number, r.document_header_text)
       );
+      invoiceMatched = rows.length > 0;
+    }
 
-      if (matchingInvRows.length > 0) {
-        rows = matchingInvRows;
-        invoiceMatched = true;
-      }
+    if (rows.length === 0) {
+      return emptyResult;
     }
 
     // Categorize documents and movements
@@ -761,4 +789,270 @@ export function convertSapItemsToPackageDetails(
     storage_location: item.storage_location || undefined,
     bin_allocated: false,
   }));
+}
+
+export interface DrcSyncOutcome {
+  updated: boolean;
+  drcNumber: string;
+  receiptId: number;
+  doc103: string | null;
+  doc105: string | null;
+  isGrnClosed: boolean;
+  reason?: string;
+  updatedReceipt?: ReceiptHeader;
+}
+
+export interface BatchDrcSyncResult {
+  totalProcessed: number;
+  updatedCount: number;
+  grnClosedCount: number;
+  doc103Count: number;
+  alreadySyncedCount: number;
+  noMatchCount: number;
+  outcomes: DrcSyncOutcome[];
+}
+
+/**
+ * Syncs a single DRC with SAP MB51 history matching STRICTLY on PO and Invoice.
+ * Automatically maps 103 and 105 documents, updates status to "Closed" / "GRN created"
+ * if 105 is posted, and populates package details with material line items.
+ */
+export async function syncSingleDrcWithSap(
+  receipt: ReceiptHeader
+): Promise<DrcSyncOutcome> {
+  const po = (receipt.sap_po_number || receipt.po_number || "").trim();
+  const inv = (receipt.invoice_number || "").trim();
+
+  if (!po && !inv) {
+    return {
+      updated: false,
+      drcNumber: receipt.drc_number,
+      receiptId: receipt.id,
+      doc103: null,
+      doc105: null,
+      isGrnClosed: false,
+      reason: "No PO or Invoice provided in DRC",
+    };
+  }
+
+  const lookupResult = await findSapDocumentsForDrc(po, inv);
+  if (!lookupResult.hasMatches) {
+    return {
+      updated: false,
+      drcNumber: receipt.drc_number,
+      receiptId: receipt.id,
+      doc103: null,
+      doc105: null,
+      isGrnClosed: false,
+      reason: "No matching MB51 records found for PO & Invoice",
+    };
+  }
+
+  const doc103 =
+    lookupResult.primary103Doc ||
+    lookupResult.items.find((i) => i.sap_103_doc)?.sap_103_doc ||
+    null;
+  const date103 =
+    lookupResult.primary103Date ||
+    lookupResult.items.find((i) => i.sap_103_date)?.sap_103_date ||
+    null;
+  const doc105 =
+    lookupResult.primary105Doc ||
+    lookupResult.items.find((i) => i.sap_105_doc)?.sap_105_doc ||
+    null;
+  const date105 =
+    lookupResult.primary105Date ||
+    lookupResult.items.find((i) => i.sap_105_date)?.sap_105_date ||
+    null;
+
+  const headerUpdate: Record<string, unknown> = {};
+
+  if (doc103 && receipt.sap_103_doc !== doc103) {
+    headerUpdate.sap_103_doc = doc103;
+    if (date103) headerUpdate.sap_103_date = date103;
+  }
+
+  if (doc105) {
+    if (receipt.sap_105_doc !== doc105 || receipt.grn_number !== doc105) {
+      headerUpdate.sap_105_doc = doc105;
+      headerUpdate.grn_number = doc105;
+    }
+    if (date105) {
+      headerUpdate.sap_105_date = date105;
+      headerUpdate.grn_date = date105.split("T")[0];
+    }
+    if (receipt.status !== "Closed") {
+      headerUpdate.status = "Closed";
+      headerUpdate.closed_date = receipt.closed_date || new Date().toISOString();
+    }
+    if (receipt.inspection_status !== "GRN created") {
+      headerUpdate.inspection_status = "GRN created";
+    }
+  }
+
+  // Update package details if line items found
+  if (lookupResult.items.length > 0) {
+    const existingPkgs = receipt.package_details || [];
+    if (
+      existingPkgs.length === 0 ||
+      existingPkgs.every((p) => !p.material_code)
+    ) {
+      headerUpdate.package_details = convertSapItemsToPackageDetails(lookupResult.items);
+    } else {
+      // Enrich existing package items
+      let pkgChanged = false;
+      const updatedPkgs = existingPkgs.map((pkg) => {
+        const matched = lookupResult.items.find(
+          (it) =>
+            it.material_code &&
+            it.material_code.toLowerCase() === (pkg.material_code || "").toLowerCase()
+        );
+        if (matched) {
+          pkgChanged = true;
+          return {
+            ...pkg,
+            sap_103_doc: matched.sap_103_doc || pkg.sap_103_doc,
+            sap_103_date: matched.sap_103_date || pkg.sap_103_date,
+            sap_105_doc: matched.sap_105_doc || pkg.sap_105_doc,
+            sap_105_date: matched.sap_105_date || pkg.sap_105_date,
+            item_no: matched.item_no || pkg.item_no,
+            storage_location: matched.storage_location || pkg.storage_location,
+          };
+        }
+        return pkg;
+      });
+      if (pkgChanged) {
+        headerUpdate.package_details = updatedPkgs;
+      }
+    }
+  }
+
+  if (
+    lookupResult.vendorName &&
+    (!receipt.vendor_name || receipt.vendor_name === "Unknown Vendor")
+  ) {
+    headerUpdate.vendor_name = lookupResult.vendorName;
+  }
+  if (lookupResult.poNumber && !receipt.sap_po_number) {
+    headerUpdate.sap_po_number = lookupResult.poNumber;
+  }
+
+  if (Object.keys(headerUpdate).length === 0) {
+    return {
+      updated: false,
+      drcNumber: receipt.drc_number,
+      receiptId: receipt.id,
+      doc103,
+      doc105,
+      isGrnClosed: !!(receipt.sap_105_doc || receipt.grn_number),
+      reason: "Already up to date",
+    };
+  }
+
+  const { data: updatedHeader, error } = await supabase
+    .from("receipt_header")
+    .update(headerUpdate)
+    .eq("id", receipt.id)
+    .select()
+    .single();
+
+  if (error) {
+    console.error(`Error updating DRC ${receipt.drc_number}:`, error);
+    return {
+      updated: false,
+      drcNumber: receipt.drc_number,
+      receiptId: receipt.id,
+      doc103,
+      doc105,
+      isGrnClosed: false,
+      reason: error.message,
+    };
+  }
+
+  return {
+    updated: true,
+    drcNumber: receipt.drc_number,
+    receiptId: receipt.id,
+    doc103,
+    doc105,
+    isGrnClosed: !!doc105,
+    updatedReceipt: updatedHeader as ReceiptHeader,
+  };
+}
+
+/**
+ * Common batch fetch function:
+ * Automatically iterates through DRCs, fetches 103 and 105 SAP documents
+ * matching strictly by PO and Invoice in MB51 history, and updates status and details.
+ */
+export async function syncAllDrcsWithSap(
+  targetReceipts?: ReceiptHeader[]
+): Promise<BatchDrcSyncResult> {
+  let receiptsToSync = targetReceipts;
+  if (!receiptsToSync || receiptsToSync.length === 0) {
+    const { data, error } = await supabase
+      .from("receipt_header")
+      .select("*")
+      .order("id", { ascending: false });
+    if (error) {
+      console.error("Error fetching receipts for SAP sync:", error);
+      return {
+        totalProcessed: 0,
+        updatedCount: 0,
+        grnClosedCount: 0,
+        doc103Count: 0,
+        alreadySyncedCount: 0,
+        noMatchCount: 0,
+        outcomes: [],
+      };
+    }
+    receiptsToSync = (data ?? []) as ReceiptHeader[];
+  }
+
+  // Filter receipts that have either PO or Invoice
+  const eligible = receiptsToSync.filter(
+    (r) =>
+      (r.sap_po_number || r.po_number || "").trim() ||
+      (r.invoice_number || "").trim()
+  );
+
+  const outcomes: DrcSyncOutcome[] = [];
+  let updatedCount = 0;
+  let grnClosedCount = 0;
+  let doc103Count = 0;
+  let alreadySyncedCount = 0;
+  let noMatchCount = 0;
+
+  // Process in small parallel chunks to avoid exhausting database connections
+  const CHUNK_SIZE = 5;
+  for (let i = 0; i < eligible.length; i += CHUNK_SIZE) {
+    const chunk = eligible.slice(i, i + CHUNK_SIZE);
+    const chunkResults = await Promise.all(
+      chunk.map((r) => syncSingleDrcWithSap(r))
+    );
+    for (const res of chunkResults) {
+      outcomes.push(res);
+      if (res.updated) {
+        updatedCount++;
+        if (res.isGrnClosed) grnClosedCount++;
+        else if (res.doc103) doc103Count++;
+      } else if (res.reason === "Already up to date") {
+        alreadySyncedCount++;
+      } else if (
+        res.reason === "No matching MB51 records found for PO & Invoice"
+      ) {
+        noMatchCount++;
+      }
+    }
+  }
+
+  return {
+    totalProcessed: eligible.length,
+    updatedCount,
+    grnClosedCount,
+    doc103Count,
+    alreadySyncedCount,
+    noMatchCount,
+    outcomes,
+  };
 }

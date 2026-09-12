@@ -83,6 +83,7 @@ import { DrcBinAllocationModal } from "../components/DrcBinAllocationModal";
 import {
   findSapDocumentsForDrc,
   convertSapItemsToPackageDetails,
+  syncAllDrcsWithSap,
   type DrcSapLookupResult,
   type SapMatchedLineItem,
 } from "../services/drcSapSyncService";
@@ -1029,14 +1030,15 @@ export default function MaterialReceipt() {
   const [viewSapLoading, setViewSapLoading] = useState(false);
 
   const checkSapForView = useCallback(async (receipt: ReceiptHeader) => {
-    if (!receipt.sap_po_number && !receipt.invoice_number) {
+    const poToSearch = receipt.sap_po_number || receipt.po_number || "";
+    if (!poToSearch && !receipt.invoice_number) {
       setViewSapLookup(null);
       return;
     }
     setViewSapLoading(true);
     try {
       const res = await findSapDocumentsForDrc(
-        receipt.sap_po_number,
+        poToSearch,
         receipt.invoice_number
       );
       setViewSapLookup(res);
@@ -1747,6 +1749,62 @@ export default function MaterialReceipt() {
     setBulkStrapDialogOpen(true);
   }
 
+  // ---------------- Common SAP 103 / 105 Fetch & Status Update ----------------
+  const [syncingSap, setSyncingSap] = useState(false);
+
+  const handleFetchSapAll = useCallback(async () => {
+    setSyncingSap(true);
+    try {
+      const targetReceipts =
+        selectedReceiptIds.length > 0
+          ? receipts.filter((r) => selectedReceiptIds.includes(r.id))
+          : undefined;
+
+      const result = await syncAllDrcsWithSap(targetReceipts);
+
+      await refreshAll();
+
+      if (result.updatedCount > 0) {
+        const parts: string[] = [];
+        if (result.grnClosedCount > 0) {
+          parts.push(`${result.grnClosedCount} marked GRN created (105)`);
+        }
+        if (result.doc103Count > 0) {
+          parts.push(`${result.doc103Count} linked with SAP 103`);
+        }
+        showSnackbar(
+          `Updated ${result.updatedCount} DRC(s) from SAP MB51${
+            parts.length > 0 ? `: ${parts.join(", ")}` : "."
+          }`,
+          "success"
+        );
+      } else if (result.alreadySyncedCount > 0 && result.noMatchCount === 0) {
+        showSnackbar(
+          "All DRCs are already up to date with uploaded SAP MB51 history.",
+          "info"
+        );
+      } else if (result.totalProcessed === 0) {
+        showSnackbar(
+          "No DRCs with PO or Invoice found to match against MB51.",
+          "info"
+        );
+      } else {
+        showSnackbar(
+          `Checked ${result.totalProcessed} DRC(s). No new 103/105 records matched both PO and Invoice in MB51 history.`,
+          "info"
+        );
+      }
+    } catch (err: any) {
+      console.error("Fetch SAP error:", err);
+      showSnackbar(
+        "Failed to fetch SAP documents: " + (err?.message || "Unknown error"),
+        "error"
+      );
+    } finally {
+      setSyncingSap(false);
+    }
+  }, [receipts, selectedReceiptIds, refreshAll]);
+
   function handleOpenPrintMenu(e: MouseEvent<HTMLElement>, receipt: ReceiptHeader) {
     e.stopPropagation();
     setPrintMenuAnchor({ anchorEl: e.currentTarget, receipt });
@@ -1853,7 +1911,7 @@ export default function MaterialReceipt() {
           Material Receipt
         </Typography>
 
-        <Box sx={{ display: "flex", gap: 1, alignItems: "center", width: { xs: "100%", sm: "auto" } }}>
+        <Box sx={{ display: "flex", gap: 1, alignItems: "center", width: { xs: "100%", sm: "auto" }, flexWrap: "wrap" }}>
           {selectedReceiptIds.length > 0 && (
             <Button
               variant="outlined"
@@ -1870,6 +1928,42 @@ export default function MaterialReceipt() {
               Bulk Straps ({selectedReceiptIds.length})
             </Button>
           )}
+          <Tooltip title="Automatically fetch 103 and 105 SAP documents from MB51 history matching strictly by PO and Invoice">
+            <span>
+              <Button
+                variant="outlined"
+                color="info"
+                disabled={syncingSap}
+                startIcon={
+                  syncingSap ? (
+                    <CircularProgress size={18} color="inherit" />
+                  ) : (
+                    <SyncIcon />
+                  )
+                }
+                onClick={handleFetchSapAll}
+                sx={{
+                  minHeight: 48,
+                  borderRadius: 2.5,
+                  fontWeight: 700,
+                  bgcolor: "info.50",
+                  borderColor: "info.300",
+                  "&:hover": {
+                    bgcolor: "info.100",
+                    borderColor: "info.main",
+                  },
+                  width: { xs: selectedReceiptIds.length > 0 ? "auto" : "100%", sm: "auto" },
+                  flex: { xs: 1, sm: "none" },
+                }}
+              >
+                {syncingSap
+                  ? "Fetching SAP..."
+                  : selectedReceiptIds.length > 0
+                  ? `Fetch SAP (${selectedReceiptIds.length})`
+                  : "Fetch SAP 103/105"}
+              </Button>
+            </span>
+          </Tooltip>
           <Button
             variant="contained"
             startIcon={<AddIcon />}
@@ -2072,6 +2166,39 @@ export default function MaterialReceipt() {
                 Reset Filter
               </Button>
             )}
+            <Box sx={{ ml: "auto", display: "flex", alignItems: "center" }}>
+              <Tooltip title="Automatically fetch SAP 103 and 105 documents by matching PO and Invoice">
+                <span>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="info"
+                    disabled={syncingSap}
+                    startIcon={
+                      syncingSap ? (
+                        <CircularProgress size={14} color="inherit" />
+                      ) : (
+                        <SyncIcon sx={{ fontSize: 16 }} />
+                      )
+                    }
+                    onClick={handleFetchSapAll}
+                    sx={{
+                      fontSize: "0.75rem",
+                      py: 0.25,
+                      px: 1.25,
+                      minHeight: 28,
+                      fontWeight: 700,
+                      textTransform: "none",
+                      borderRadius: 1.5,
+                      bgcolor: "info.50",
+                      borderColor: "info.200",
+                    }}
+                  >
+                    {syncingSap ? "Fetching SAP..." : "Fetch SAP 103 / 105"}
+                  </Button>
+                </span>
+              </Tooltip>
+            </Box>
           </Box>
         </Box>
       </Paper>
@@ -2130,6 +2257,28 @@ export default function MaterialReceipt() {
                 </Typography>
               </Box>
               <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap" }}>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  color="info"
+                  disabled={syncingSap}
+                  startIcon={
+                    syncingSap ? (
+                      <CircularProgress size={14} color="inherit" />
+                    ) : (
+                      <SyncIcon sx={{ fontSize: 16 }} />
+                    )
+                  }
+                  onClick={handleFetchSapAll}
+                  sx={{
+                    borderRadius: 2,
+                    fontWeight: 700,
+                    textTransform: "none",
+                    bgcolor: "background.paper",
+                  }}
+                >
+                  {syncingSap ? "Fetching..." : `Fetch SAP (${selectedReceiptIds.length})`}
+                </Button>
                 <Button
                   variant="contained"
                   size="small"
