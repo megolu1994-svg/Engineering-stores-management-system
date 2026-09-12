@@ -128,27 +128,30 @@ export async function findSapDocumentsForDrc(
     const poNorm = normalizeDocCode(cleanPo);
     const invNorm = normalizeDocCode(cleanInv);
 
-    // Build filter conditions
-    const orConditions: string[] = [];
+    // Filter by relevant receipt movement types in SAP:
+    // 103 (GR Blocked), 104 (103 Reversal), 105 (GR Release), 106 (105 Reversal),
+    // 101 (Direct GR), 102 (101 Reversal)
+    const validReceiptMovements = new Set(["103", "104", "105", "106", "101", "102"]);
 
+    // Build targeted query conditions
+    // CRITICAL FIX: If PO is provided, query by PO ONLY so we NEVER pull in
+    // unrelated POs that coincidentally share a simple invoice number like "0357".
     if (cleanPo) {
-      orConditions.push(`purchase_order.eq.${cleanPo}`);
-      if (poNorm !== cleanPo) {
-        orConditions.push(`purchase_order.eq.${poNorm}`);
+      const poFilters = [`purchase_order.eq.${cleanPo}`];
+      if (poNorm && poNorm !== cleanPo) {
+        poFilters.push(`purchase_order.eq.${poNorm}`);
       }
-      orConditions.push(`purchase_order.ilike.%${cleanPo}%`);
-    }
-
-    if (cleanInv) {
-      orConditions.push(`invoice_number.eq.${cleanInv}`);
-      if (invNorm !== cleanInv) {
-        orConditions.push(`invoice_number.eq.${invNorm}`);
+      if (/^\d+$/.test(cleanPo) && cleanPo.length < 10) {
+        poFilters.push(`purchase_order.eq.${cleanPo.padStart(10, "0")}`);
       }
-      orConditions.push(`invoice_number.ilike.%${cleanInv}%`);
-    }
-
-    if (orConditions.length > 0) {
-      query = query.or(orConditions.join(","));
+      query = query.or(poFilters.join(","));
+    } else if (cleanInv) {
+      // Only when PO is not provided, query by invoice
+      const invFilters = [`invoice_number.eq.${cleanInv}`];
+      if (invNorm && invNorm !== cleanInv) {
+        invFilters.push(`invoice_number.eq.${invNorm}`);
+      }
+      query = query.or(invFilters.join(","));
     }
 
     const { data: rawRows, error } = await query
@@ -160,9 +163,37 @@ export async function findSapDocumentsForDrc(
       return emptyResult;
     }
 
-    const rows = rawRows ?? [];
+    let rows = (rawRows ?? []).filter((r) => {
+      const mvt = String(r.movement_type || "").trim();
+      return validReceiptMovements.has(mvt);
+    });
+
     if (rows.length === 0) {
       return emptyResult;
+    }
+
+    // If both PO and Invoice were provided, narrow down within the PO's records
+    if (cleanPo && cleanInv && rows.length > 0) {
+      const invLower = cleanInv.toLowerCase();
+      const invNormLower = invNorm.toLowerCase();
+
+      const matchingInvRows = rows.filter((r) => {
+        const rowInv = String(r.invoice_number || "").trim().toLowerCase();
+        const rowDocText = String(r.document_header_text || "").trim().toLowerCase();
+        const rowInvNorm = normalizeDocCode(r.invoice_number).toLowerCase();
+        return (
+          rowInv === invLower ||
+          rowInv === invNormLower ||
+          rowInvNorm === invNormLower ||
+          rowDocText.includes(invLower) ||
+          (invNormLower.length >= 3 && rowInv.includes(invNormLower))
+        );
+      });
+
+      // Only narrow down if matching invoice rows actually exist under this PO
+      if (matchingInvRows.length > 0) {
+        rows = matchingInvRows;
+      }
     }
 
     // Categorize documents and movements
@@ -220,7 +251,7 @@ export async function findSapDocumentsForDrc(
         if (date && (!latest103Date || date > latest103Date)) {
           latest103Date = date;
         }
-      } else if (mvt === "105") {
+      } else if (mvt === "105" || mvt === "101") {
         if (doc) doc105Set.add(doc);
         if (date && (!latest105Date || date > latest105Date)) {
           latest105Date = date;
@@ -260,22 +291,31 @@ export async function findSapDocumentsForDrc(
       } else if (mvt === "104") {
         // Reversal of 103
         item.qty103 -= Math.abs(qty);
-      } else if (mvt === "105") {
+      } else if (mvt === "105" || mvt === "101") {
         item.qty105 += qty;
         item.doc105 = doc || item.doc105;
         item.date105 = date || item.date105;
-      } else if (mvt === "106") {
-        // Reversal of 105
+      } else if (mvt === "106" || mvt === "102") {
+        // Reversal of 105 or 101
         item.qty105 -= Math.abs(qty);
       }
     }
 
     const items: SapMatchedLineItem[] = [];
     for (const item of itemMap.values()) {
+      const q103 = Math.max(0, item.qty103);
+      const q105 = Math.max(0, item.qty105);
+
+      // CRITICAL FIX: Exclude line items with zero received quantity
+      // (prevents cancelled movements or unrelated rows from showing as 0-quantity items)
+      if (q103 === 0 && q105 === 0) {
+        continue;
+      }
+
       let status: SapMatchedLineItem["status"] = "103_ONLY";
-      if (item.qty105 > 0 && item.qty105 >= item.qty103) {
+      if (q105 > 0 && q105 >= q103) {
         status = "105_POSTED";
-      } else if (item.qty105 > 0) {
+      } else if (q105 > 0) {
         status = "PARTIAL_105";
       }
 
@@ -283,8 +323,8 @@ export async function findSapDocumentsForDrc(
         material_code: item.material_code,
         material_description: item.material_description,
         item_no: item.item_no,
-        quantity_103: Math.max(0, item.qty103),
-        quantity_105: Math.max(0, item.qty105),
+        quantity_103: q103,
+        quantity_105: q105,
         unit_of_entry: item.uom,
         sap_103_doc: item.doc103,
         sap_103_date: item.date103,

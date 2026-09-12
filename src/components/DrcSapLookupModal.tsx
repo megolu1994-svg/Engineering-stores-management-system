@@ -368,7 +368,8 @@ export const DrcSapLookupModal: React.FC<DrcSapLookupModalProps> = ({
                         <TableCell sx={{ fontWeight: 700 }}>Item #</TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>Material Code</TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>Description</TableCell>
-                        <TableCell sx={{ fontWeight: 700 }} align="right">103 Qty</TableCell>
+                        <TableCell sx={{ fontWeight: 700 }}>SAP Ref</TableCell>
+                        <TableCell sx={{ fontWeight: 700 }} align="right">Qty</TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>UoM</TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>SAP Movement Status</TableCell>
                       </TableRow>
@@ -392,8 +393,18 @@ export const DrcSapLookupModal: React.FC<DrcSapLookupModalProps> = ({
                               {item.material_code}
                             </TableCell>
                             <TableCell>{item.material_description || "-"}</TableCell>
+                            <TableCell>
+                              <Typography variant="caption" sx={{ fontFamily: "monospace", display: "block" }}>
+                                {item.sap_103_doc ? `103: ${item.sap_103_doc}` : item.sap_105_doc ? `105: ${item.sap_105_doc}` : "-"}
+                              </Typography>
+                              {item.purchase_order && (
+                                <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                                  PO: {item.purchase_order}
+                                </Typography>
+                              )}
+                            </TableCell>
                             <TableCell align="right" sx={{ fontWeight: 700 }}>
-                              {item.quantity_103}
+                              {item.quantity_103 || item.quantity_105}
                             </TableCell>
                             <TableCell>{item.unit_of_entry}</TableCell>
                             <TableCell>
