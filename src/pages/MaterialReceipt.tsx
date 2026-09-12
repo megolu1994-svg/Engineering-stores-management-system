@@ -74,8 +74,18 @@ import ReceiptLongIcon from "@mui/icons-material/ReceiptLong";
 import ScaleIcon from "@mui/icons-material/Scale";
 import NoteAddIcon from "@mui/icons-material/NoteAdd";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
-import CalendarTodayIcon from "@mui/icons-material/CalendarToday";
 import DriveFileRenameOutlineIcon from "@mui/icons-material/DriveFileRenameOutline";
+import SyncIcon from "@mui/icons-material/Sync";
+import WarehouseIcon from "@mui/icons-material/Warehouse";
+import { supabase } from "../config/supabase";
+import { DrcSapLookupModal } from "../components/DrcSapLookupModal";
+import { DrcBinAllocationModal } from "../components/DrcBinAllocationModal";
+import {
+  findSapDocumentsForDrc,
+  convertSapItemsToPackageDetails,
+  type DrcSapLookupResult,
+  type SapMatchedLineItem,
+} from "../services/drcSapSyncService";
 
 import {
   createReceipt,
@@ -1002,6 +1012,234 @@ export default function MaterialReceipt() {
       .catch(() => showSnackbar("Failed to remove document.", "error"));
   }
 
+  // ---------------- SAP MB51 Lookup & Sync Modal State ----------------
+  const [sapLookupModalOpen, setSapLookupModalOpen] = useState(false);
+  const [sapLookupInitialPo, setSapLookupInitialPo] = useState("");
+  const [sapLookupInitialInv, setSapLookupInitialInv] = useState("");
+  const [sapLookupTargetReceipt, setSapLookupTargetReceipt] =
+    useState<ReceiptHeader | null>(null);
+
+  // ---------------- Bin Location Allocation Modal State ----------------
+  const [binAllocationModalOpen, setBinAllocationModalOpen] = useState(false);
+  const [binAllocationTargetReceipt, setBinAllocationTargetReceipt] =
+    useState<ReceiptHeader | null>(null);
+
+  // ---------------- Live SAP Status for View Dialog ----------------
+  const [viewSapLookup, setViewSapLookup] = useState<DrcSapLookupResult | null>(null);
+  const [viewSapLoading, setViewSapLoading] = useState(false);
+
+  const checkSapForView = useCallback(async (receipt: ReceiptHeader) => {
+    if (!receipt.sap_po_number && !receipt.invoice_number) {
+      setViewSapLookup(null);
+      return;
+    }
+    setViewSapLoading(true);
+    try {
+      const res = await findSapDocumentsForDrc(
+        receipt.sap_po_number,
+        receipt.invoice_number
+      );
+      setViewSapLookup(res);
+    } catch (err) {
+      console.warn("checkSapForView error:", err);
+      setViewSapLookup(null);
+    } finally {
+      setViewSapLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (viewReceipt) {
+      checkSapForView(viewReceipt);
+    } else {
+      setViewSapLookup(null);
+    }
+  }, [viewReceipt, checkSapForView]);
+
+  // Open SAP Lookup for Create/Edit DRC form
+  function handleOpenSapLookupForForm() {
+    setSapLookupInitialPo(form.sap_po_number);
+    setSapLookupInitialInv(form.invoice_number);
+    setSapLookupTargetReceipt(null);
+    setSapLookupModalOpen(true);
+  }
+
+  // Open SAP Lookup for an existing DRC (view or table)
+  function handleOpenSapLookupForReceipt(receipt: ReceiptHeader) {
+    setSapLookupInitialPo(receipt.sap_po_number || "");
+    setSapLookupInitialInv(receipt.invoice_number || "");
+    setSapLookupTargetReceipt(receipt);
+    setSapLookupModalOpen(true);
+  }
+
+  // Open Bin Allocation Modal for a DRC
+  function handleOpenBinAllocation(receipt: ReceiptHeader) {
+    setBinAllocationTargetReceipt(receipt);
+    setBinAllocationModalOpen(true);
+  }
+
+  // Apply fetched SAP items to Create/Edit DRC form
+  function handleApplySapItemsToForm(
+    items: SapMatchedLineItem[],
+    meta: {
+      vendor?: string;
+      poDate?: string;
+      po?: string;
+      invoice?: string;
+      doc103?: string;
+      doc105?: string;
+    }
+  ) {
+    const convertedRows = convertSapItemsToPackageDetails(items);
+    setForm((prev) => ({
+      ...prev,
+      package_details: convertedRows,
+      vendor_name: prev.vendor_name || meta.vendor || "",
+      sap_po_date: prev.sap_po_date || meta.poDate || "",
+      sap_po_number: prev.sap_po_number || meta.po || "",
+      invoice_number: prev.invoice_number || meta.invoice || "",
+    }));
+    showSnackbar(
+      `Successfully mapped ${items.length} material(s) from SAP MB51 into DRC form.`,
+      "success"
+    );
+  }
+
+  // Apply fetched SAP items to an existing DRC in database
+  async function handleApplySapItemsToReceipt(
+    receipt: ReceiptHeader,
+    items: SapMatchedLineItem[],
+    lookupResult: DrcSapLookupResult
+  ) {
+    try {
+      const convertedRows = convertSapItemsToPackageDetails(items);
+      const updateData: ReceiptFormInput = {
+        receipt_mode: receipt.receipt_mode || "Vehicle",
+        vehicle_number: receipt.vehicle_number || "",
+        package_details: convertedRows,
+        vendor_name: receipt.vendor_name || lookupResult.vendorName || "Unknown Vendor",
+        sap_po_number: receipt.sap_po_number || lookupResult.poNumber || "",
+        sap_po_date: receipt.sap_po_date || lookupResult.primary103Date || "",
+        gem_order_number: receipt.gem_order_number || "",
+        gem_order_date: receipt.gem_order_date || "",
+        invoice_number: receipt.invoice_number || lookupResult.invoiceNumber || "",
+        invoice_date: receipt.invoice_date || "",
+        challan_number: receipt.challan_number || "",
+        challan_date: receipt.challan_date || "",
+        eway_bill_number: receipt.eway_bill_number || "",
+        eway_bill_date: receipt.eway_bill_date || "",
+        lorry_receipt_number: receipt.lorry_receipt_number || "",
+        lorry_receipt_date: receipt.lorry_receipt_date || "",
+        weightment_slip_number: receipt.weightment_slip_number || "",
+        gross_weight: receipt.gross_weight !== null ? String(receipt.gross_weight) : "",
+        tare_weight: receipt.tare_weight !== null ? String(receipt.tare_weight) : "",
+        net_weight: receipt.net_weight !== null ? String(receipt.net_weight) : "",
+        purpose: receipt.purpose || "",
+        driver_name: receipt.driver_name || "",
+        tax_invoice_value: receipt.tax_invoice_value !== null ? String(receipt.tax_invoice_value) : "",
+        msme_type: receipt.msme_type || "",
+        important_note: receipt.important_note || "",
+        delivery_location: receipt.delivery_location || "",
+        vim_approval: receipt.vim_approval || "",
+        remarks: receipt.remarks || "",
+      };
+
+      const updated = await updateReceipt(
+        receipt.id,
+        updateData,
+        [],
+        receipt.photo_urls,
+        [],
+        receipt.attachment_paths || []
+      );
+      setViewReceipt(updated);
+      await refreshAll();
+      showSnackbar(
+        `Linked ${items.length} material(s) from SAP MB51 to ${receipt.drc_number}.`,
+        "success"
+      );
+    } catch (err) {
+      console.error("Failed to link SAP items to receipt:", err);
+      showSnackbar("Failed to link SAP items to DRC.", "error");
+    }
+  }
+
+  // One-click apply 105 as GRN
+  async function handleApply105AsGrn(
+    receipt: ReceiptHeader,
+    doc105: string,
+    doc105Date?: string | null
+  ) {
+    try {
+      const dateToUse = doc105Date || todayIso();
+      const updated = await updateReceipt(
+        receipt.id,
+        {
+          receipt_mode: receipt.receipt_mode,
+          vehicle_number: receipt.vehicle_number || "",
+          package_details: receipt.package_details,
+          vendor_name: receipt.vendor_name,
+          sap_po_number: receipt.sap_po_number || "",
+          sap_po_date: receipt.sap_po_date || "",
+          gem_order_number: receipt.gem_order_number || "",
+          gem_order_date: receipt.gem_order_date || "",
+          invoice_number: receipt.invoice_number || "",
+          invoice_date: receipt.invoice_date || "",
+          challan_number: receipt.challan_number || "",
+          challan_date: receipt.challan_date || "",
+          eway_bill_number: receipt.eway_bill_number || "",
+          eway_bill_date: receipt.eway_bill_date || "",
+          lorry_receipt_number: receipt.lorry_receipt_number || "",
+          lorry_receipt_date: receipt.lorry_receipt_date || "",
+          weightment_slip_number: receipt.weightment_slip_number || "",
+          gross_weight: receipt.gross_weight !== null ? String(receipt.gross_weight) : "",
+          tare_weight: receipt.tare_weight !== null ? String(receipt.tare_weight) : "",
+          net_weight: receipt.net_weight !== null ? String(receipt.net_weight) : "",
+          purpose: receipt.purpose || "",
+          driver_name: receipt.driver_name || "",
+          tax_invoice_value: receipt.tax_invoice_value !== null ? String(receipt.tax_invoice_value) : "",
+          msme_type: receipt.msme_type || "",
+          important_note: receipt.important_note || "",
+          delivery_location: receipt.delivery_location || "",
+          vim_approval: receipt.vim_approval || "",
+          remarks: receipt.remarks || "",
+        },
+        [],
+        receipt.photo_urls,
+        [],
+        receipt.attachment_paths || []
+      );
+
+      // Also set grn_number directly
+      const { data: updatedHeader, error } = await supabase
+        .from("receipt_header")
+        .update({
+          grn_number: doc105,
+          grn_date: dateToUse,
+          sap_105_doc: doc105,
+          sap_105_date: dateToUse,
+        })
+        .eq("id", receipt.id)
+        .select()
+        .single();
+
+      if (error) {
+        console.warn("Could not set 105 columns directly:", error.message);
+      }
+
+      const finalReceipt = (updatedHeader as ReceiptHeader) || updated;
+      setViewReceipt(finalReceipt);
+      await refreshAll();
+      showSnackbar(
+        `Applied SAP 105 (${doc105}) as GRN Number for ${receipt.drc_number}.`,
+        "success"
+      );
+    } catch (err) {
+      console.error("handleApply105AsGrn error:", err);
+      showSnackbar("Failed to apply SAP 105 as GRN.", "error");
+    }
+  }
+
   // ---------------- Mail (AI-assisted draft - copy only, never sent from
   // this app; the operator pastes it into whatever mail client they use) ----------------
   const [mailDialogOpen, setMailDialogOpen] = useState(false);
@@ -1913,19 +2151,50 @@ export default function MaterialReceipt() {
                   </Grid>
 
                   <Box
-                    sx={{ display: "flex", justifyContent: "flex-end", gap: 0.5, mt: 0.75 }}
+                    sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mt: 0.75, pt: 0.5, borderTop: "1px solid", borderColor: "divider" }}
                     onClick={(e) => e.stopPropagation()}
                   >
-                    <Tooltip title="Print DRC & File Strap">
-                      <IconButton
-                        size="small"
-                        onClick={(e) => handleOpenPrintMenu(e, r)}
-                        aria-label="Print DRC & File Strap"
-                        sx={{ color: "primary.main" }}
-                      >
-                        <PrintIcon fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
+                    <Box>
+                      {r.package_details && r.package_details.length > 0 && r.package_details.every((p) => p.bin_allocated) ? (
+                        <Chip size="small" color="success" icon={<WarehouseIcon fontSize="small" />} label="Bins Done" sx={{ height: 20, fontSize: "0.65rem", fontWeight: 700 }} />
+                      ) : r.sap_105_doc || r.grn_number ? (
+                        <Chip size="small" color="primary" variant="outlined" icon={<TaskAltIcon fontSize="small" />} label="105 GRN" sx={{ height: 20, fontSize: "0.65rem", fontWeight: 600 }} />
+                      ) : r.sap_103_doc || (r.package_details && r.package_details.some((p) => p.material_code)) ? (
+                        <Chip size="small" color="info" variant="outlined" icon={<SyncIcon fontSize="small" />} label="103 Synced" sx={{ height: 20, fontSize: "0.65rem", fontWeight: 600 }} />
+                      ) : null}
+                    </Box>
+                    <Box sx={{ display: "flex", gap: 0.5 }}>
+                      <Tooltip title="Fetch from SAP MB51">
+                        <IconButton
+                          size="small"
+                          onClick={() => handleOpenSapLookupForReceipt(r)}
+                          aria-label="Fetch from SAP MB51"
+                          sx={{ color: "info.main" }}
+                        >
+                          <SyncIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                      <Tooltip title="Allocate Bins">
+                        <IconButton
+                          size="small"
+                          onClick={() => handleOpenBinAllocation(r)}
+                          aria-label="Allocate Bins"
+                          sx={{ color: "primary.main" }}
+                        >
+                          <WarehouseIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                      <Tooltip title="Print DRC & File Strap">
+                        <IconButton
+                          size="small"
+                          onClick={(e) => handleOpenPrintMenu(e, r)}
+                          aria-label="Print DRC & File Strap"
+                          sx={{ color: "action.active" }}
+                        >
+                          <PrintIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </Box>
                   </Box>
                 </Card>
               );
@@ -1964,6 +2233,7 @@ export default function MaterialReceipt() {
                   <TableCell>Vehicle Number</TableCell>
                   <TableCell>Receipt Date</TableCell>
                   <TableCell>Status & Remarks</TableCell>
+                  <TableCell>SAP / Bins</TableCell>
                   <TableCell align="right">Actions</TableCell>
                 </TableRow>
               </TableHead>
@@ -2001,14 +2271,45 @@ export default function MaterialReceipt() {
                       <TableCell>
                         <DrcStatusChip receipt={r} />
                       </TableCell>
+                      <TableCell>
+                        {r.package_details && r.package_details.length > 0 && r.package_details.every((p) => p.bin_allocated) ? (
+                          <Chip size="small" color="success" icon={<WarehouseIcon fontSize="small" />} label="Bins Done" sx={{ height: 22, fontSize: "0.68rem", fontWeight: 700 }} />
+                        ) : r.sap_105_doc || r.grn_number ? (
+                          <Chip size="small" color="primary" variant="outlined" icon={<TaskAltIcon fontSize="small" />} label="105 GRN" sx={{ height: 22, fontSize: "0.68rem", fontWeight: 600 }} />
+                        ) : r.sap_103_doc || (r.package_details && r.package_details.some((p) => p.material_code)) ? (
+                          <Chip size="small" color="info" variant="outlined" icon={<SyncIcon fontSize="small" />} label="103 Synced" sx={{ height: 22, fontSize: "0.68rem", fontWeight: 600 }} />
+                        ) : (
+                          <Typography variant="caption" color="text.secondary">-</Typography>
+                        )}
+                      </TableCell>
                       <TableCell align="right" onClick={(e) => e.stopPropagation()}>
-                        <Box sx={{ display: "flex", justifyContent: "flex-end" }}>
+                        <Box sx={{ display: "flex", justifyContent: "flex-end", gap: 0.5 }}>
+                          <Tooltip title="Fetch from SAP MB51">
+                            <IconButton
+                              size="small"
+                              onClick={() => handleOpenSapLookupForReceipt(r)}
+                              aria-label="Fetch from SAP MB51"
+                              sx={{ color: "info.main" }}
+                            >
+                              <SyncIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                          <Tooltip title="Allocate Bin Locations">
+                            <IconButton
+                              size="small"
+                              onClick={() => handleOpenBinAllocation(r)}
+                              aria-label="Allocate Bin Locations"
+                              sx={{ color: "primary.main" }}
+                            >
+                              <WarehouseIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
                           <Tooltip title="Print DRC & File Strap">
                             <IconButton
                               size="small"
                               onClick={(e) => handleOpenPrintMenu(e, r)}
                               aria-label="Print DRC & File Strap"
-                              sx={{ color: "primary.main" }}
+                              sx={{ color: "action.active" }}
                             >
                               <PrintIcon fontSize="small" />
                             </IconButton>
@@ -2165,15 +2466,35 @@ export default function MaterialReceipt() {
                 <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", px: 1.5, py: 1, borderBottom: "1px solid", borderColor: "divider" }}>
                   <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
                     <Inventory2Icon fontSize="small" sx={{ color: "primary.main" }} />
-                    <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>PACKAGE DETAILS</Typography>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>PACKAGE DETAILS / MATERIALS</Typography>
                   </Box>
-                  <Button size="small" startIcon={<AddIcon fontSize="small" />} onClick={addPackageRow} sx={{ fontWeight: 600, textTransform: "none" }}>
-                    Add Row
-                  </Button>
+                  <Box sx={{ display: "flex", gap: 0.75 }}>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<SyncIcon fontSize="small" />}
+                      onClick={handleOpenSapLookupForForm}
+                      sx={{ fontWeight: 600, textTransform: "none", py: 0.25, px: 1, borderRadius: 1.5, fontSize: "0.75rem" }}
+                    >
+                      Fetch SAP 103
+                    </Button>
+                    <Button size="small" startIcon={<AddIcon fontSize="small" />} onClick={addPackageRow} sx={{ fontWeight: 600, textTransform: "none" }}>
+                      Add Row
+                    </Button>
+                  </Box>
                 </Box>
                 <Box sx={{ p: 1.5, display: "flex", flexDirection: "column", gap: 1 }}>
                   {form.package_details.map((row, index) => (
                     <Box key={index} sx={{ display: "flex", flexDirection: { xs: "column", sm: "row" }, alignItems: { xs: "stretch", sm: "center" }, gap: 0.75, p: 1, borderRadius: 2, bgcolor: "grey.50" }}>
+                      {row.material_code && (
+                        <Chip
+                          size="small"
+                          color="info"
+                          variant="outlined"
+                          label={row.material_code}
+                          sx={{ fontWeight: 700, fontFamily: "monospace", height: 28, flexShrink: 0 }}
+                        />
+                      )}
                       <TextField label="Qty" placeholder="e.g. 10" size="small" value={row.quantity} onChange={(e) => updatePackageRow(index, "quantity", e.target.value)} sx={{ width: { xs: "100%", sm: 80 }, flexShrink: 0, "& .MuiOutlinedInput-root": { borderRadius: 2 } }} />
                       <Autocomplete freeSolo options={packageTypeSuggestions} inputValue={row.package_type} onInputChange={(_e, value) => updatePackageRow(index, "package_type", value ?? "")} renderInput={(params) => (<TextField {...params} label="Package Type" placeholder="e.g. Boxes, Drums" size="small" sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }} />)} sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }} />
                       <TextField label="Description" placeholder="Optional" size="small" fullWidth value={row.description} onChange={(e) => updatePackageRow(index, "description", e.target.value)} sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }} />
@@ -2192,10 +2513,20 @@ export default function MaterialReceipt() {
 
               {/* --- Purchase Details --- */}
               <Card elevation={0} sx={{ borderRadius: 2, border: "1px solid", borderColor: "divider" }}>
-                <Box sx={{ display: "flex", alignItems: "center", gap: 0.75, px: 1.5, py: 1, borderBottom: "1px solid", borderColor: "divider" }}>
-                  <LocalOfferIcon fontSize="small" sx={{ color: "primary.main" }} />
-                  <Typography variant="subtitle2" sx={{ fontWeight: 700, flex: 1 }}>PURCHASE DETAILS</Typography>
-                  <CalendarTodayIcon fontSize="small" sx={{ color: "text.secondary" }} />
+                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", px: 1.5, py: 1, borderBottom: "1px solid", borderColor: "divider" }}>
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
+                    <LocalOfferIcon fontSize="small" sx={{ color: "primary.main" }} />
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>PURCHASE DETAILS</Typography>
+                  </Box>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<SyncIcon fontSize="small" />}
+                    onClick={handleOpenSapLookupForForm}
+                    sx={{ fontWeight: 600, textTransform: "none", py: 0.25, px: 1, borderRadius: 1.5, fontSize: "0.75rem" }}
+                  >
+                    Fetch from SAP MB51
+                  </Button>
                 </Box>
                 <Box sx={{ p: 1.5, display: "flex", flexDirection: "column", gap: 1.5 }}>
                   <TextField label="SAP PO Number" size="small" fullWidth value={form.sap_po_number} onChange={(e) => updateField("sap_po_number", e.target.value)} sx={{ "& .MuiOutlinedInput-root": { borderRadius: 2 } }} />
@@ -2402,7 +2733,7 @@ export default function MaterialReceipt() {
         open={!!viewReceipt}
         onClose={() => setViewReceipt(null)}
         fullWidth
-        maxWidth="sm"
+        maxWidth="md"
         fullScreen={mobile}
       >
         {viewReceipt && (
@@ -2413,17 +2744,273 @@ export default function MaterialReceipt() {
                 alignItems: "center",
                 justifyContent: "space-between",
                 fontWeight: 700,
+                borderBottom: "1px solid",
+                borderColor: "divider",
+                pb: 1.5,
               }}
             >
-              {viewReceipt.drc_number}
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
+                <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                  {viewReceipt.drc_number}
+                </Typography>
+                <DrcStatusChip receipt={viewReceipt} showRemarks={false} />
+              </Box>
               <IconButton onClick={() => setViewReceipt(null)} size="small">
                 <CloseIcon fontSize="small" />
               </IconButton>
             </DialogTitle>
 
-            <DialogContent dividers sx={{ p: 1.5 }}>
+            <DialogContent dividers sx={{ p: { xs: 1.5, sm: 2 } }}>
+              {/* ---- SAP MB51 & 2-Step Goods Receipt Workflow Panel ---- */}
+              <Paper
+                elevation={0}
+                sx={{
+                  p: 2,
+                  mb: 2,
+                  borderRadius: 2.5,
+                  border: "1px solid",
+                  borderColor: "primary.light",
+                  bgcolor: "grey.50",
+                }}
+              >
+                <Box
+                  sx={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                    gap: 1,
+                    mb: 1.5,
+                    pb: 1,
+                    borderBottom: "1px solid",
+                    borderColor: "divider",
+                  }}
+                >
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                    <SyncIcon color="primary" />
+                    <Box>
+                      <Typography variant="subtitle2" sx={{ fontWeight: 700, color: "primary.dark" }}>
+                        SAP MB51 History & 2-Step Goods Receipt
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        PO: <strong>{viewReceipt.sap_po_number || "-"}</strong> | Invoice: <strong>{viewReceipt.invoice_number || "-"}</strong>
+                      </Typography>
+                    </Box>
+                  </Box>
+
+                  <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={viewSapLoading ? <CircularProgress size={14} /> : <SyncIcon fontSize="small" />}
+                      onClick={() => checkSapForView(viewReceipt)}
+                      disabled={viewSapLoading}
+                      sx={{ fontWeight: 600, textTransform: "none", borderRadius: 2 }}
+                    >
+                      Check MB51
+                    </Button>
+                    <Button
+                      size="small"
+                      variant="contained"
+                      startIcon={<WarehouseIcon fontSize="small" />}
+                      onClick={() => handleOpenBinAllocation(viewReceipt)}
+                      sx={{ fontWeight: 700, textTransform: "none", borderRadius: 2 }}
+                    >
+                      Allocate Bins
+                    </Button>
+                  </Box>
+                </Box>
+
+                {/* 4-Step Visual Workflow Grid */}
+                <Grid container spacing={1.5}>
+                  {/* Step 1: 103 GR Blocked Stock */}
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <Paper
+                      elevation={0}
+                      sx={{
+                        p: 1.5,
+                        borderRadius: 2,
+                        bgcolor: "background.paper",
+                        border: "1px solid",
+                        borderColor: (viewReceipt.sap_103_doc || viewSapLookup?.has103) ? "info.light" : "divider",
+                        height: "100%",
+                        display: "flex",
+                        flexDirection: "column",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <Box>
+                        <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.5 }}>
+                          <Typography variant="caption" sx={{ fontWeight: 700, color: "info.dark" }}>
+                            STEP 1: 103 GR BLOCKED STOCK
+                          </Typography>
+                          {(viewReceipt.sap_103_doc || viewSapLookup?.has103) ? (
+                            <Chip size="small" color="info" label="103 In SAP" sx={{ height: 20, fontSize: "0.65rem", fontWeight: 700 }} />
+                          ) : (
+                            <Chip size="small" variant="outlined" label="Pending 103" sx={{ height: 20, fontSize: "0.65rem" }} />
+                          )}
+                        </Box>
+                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          Doc: {viewReceipt.sap_103_doc || viewSapLookup?.primary103Doc || "Not Linked"}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                          Date: {viewReceipt.sap_103_date || viewSapLookup?.primary103Date || "-"}
+                        </Typography>
+                      </Box>
+
+                      {(!viewReceipt.package_details || !viewReceipt.package_details.some((p) => p.material_code)) && (
+                        <Button
+                          size="small"
+                          variant="text"
+                          startIcon={<SyncIcon fontSize="small" />}
+                          onClick={() => handleOpenSapLookupForReceipt(viewReceipt)}
+                          sx={{ textTransform: "none", fontWeight: 600, p: 0, mt: 1, justifyContent: "flex-start" }}
+                        >
+                          Fetch / Map 103 Materials
+                        </Button>
+                      )}
+                    </Paper>
+                  </Grid>
+
+                  {/* Step 2: Inspection & Counting */}
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <Paper
+                      elevation={0}
+                      sx={{
+                        p: 1.5,
+                        borderRadius: 2,
+                        bgcolor: "background.paper",
+                        border: "1px solid",
+                        borderColor: viewReceipt.status === "Pending GRN" || viewReceipt.status === "Closed" ? "success.light" : "divider",
+                        height: "100%",
+                        display: "flex",
+                        flexDirection: "column",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <Box>
+                        <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.5 }}>
+                          <Typography variant="caption" sx={{ fontWeight: 700, color: "text.primary" }}>
+                            STEP 2: INSPECTION & COUNTING
+                          </Typography>
+                          <Chip
+                            size="small"
+                            color={viewReceipt.status === "Pending GRN" || viewReceipt.status === "Closed" ? "success" : "warning"}
+                            label={getDrcDisplayStatus(viewReceipt).label}
+                            sx={{ height: 20, fontSize: "0.65rem", fontWeight: 700 }}
+                          />
+                        </Box>
+                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          {viewReceipt.inspection_by ? `By: ${viewReceipt.inspection_by}` : "Pending Inspection"}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                          {viewReceipt.inspection_date ? formatDate(viewReceipt.inspection_date) : "Department check in progress"}
+                        </Typography>
+                      </Box>
+                    </Paper>
+                  </Grid>
+
+                  {/* Step 3: 105 GR Release (GRN) */}
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <Paper
+                      elevation={0}
+                      sx={{
+                        p: 1.5,
+                        borderRadius: 2,
+                        bgcolor: "background.paper",
+                        border: "1px solid",
+                        borderColor: (viewReceipt.grn_number || viewReceipt.sap_105_doc || viewSapLookup?.has105) ? "success.light" : "divider",
+                        height: "100%",
+                        display: "flex",
+                        flexDirection: "column",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <Box>
+                        <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.5 }}>
+                          <Typography variant="caption" sx={{ fontWeight: 700, color: "success.dark" }}>
+                            STEP 3: 105 GR RELEASE (GRN)
+                          </Typography>
+                          {(viewReceipt.grn_number || viewReceipt.sap_105_doc || viewSapLookup?.has105) ? (
+                            <Chip size="small" color="success" label="105 Posted" sx={{ height: 20, fontSize: "0.65rem", fontWeight: 700 }} />
+                          ) : (
+                            <Chip size="small" variant="outlined" label="Awaiting 105" sx={{ height: 20, fontSize: "0.65rem" }} />
+                          )}
+                        </Box>
+                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          GRN: {viewReceipt.grn_number || viewReceipt.sap_105_doc || viewSapLookup?.primary105Doc || "Pending"}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                          Date: {viewReceipt.grn_date || viewReceipt.sap_105_date || viewSapLookup?.primary105Date || "-"}
+                        </Typography>
+                      </Box>
+
+                      {viewSapLookup?.primary105Doc && !viewReceipt.grn_number && (
+                        <Button
+                          size="small"
+                          variant="text"
+                          color="success"
+                          startIcon={<TaskAltIcon fontSize="small" />}
+                          onClick={() => handleApply105AsGrn(viewReceipt, viewSapLookup.primary105Doc!, viewSapLookup.primary105Date)}
+                          sx={{ textTransform: "none", fontWeight: 600, p: 0, mt: 1, justifyContent: "flex-start" }}
+                        >
+                          Apply 105 ({viewSapLookup.primary105Doc}) as DRC GRN
+                        </Button>
+                      )}
+                    </Paper>
+                  </Grid>
+
+                  {/* Step 4: Bin Location Allocation */}
+                  <Grid size={{ xs: 12, sm: 6 }}>
+                    <Paper
+                      elevation={0}
+                      sx={{
+                        p: 1.5,
+                        borderRadius: 2,
+                        bgcolor: "background.paper",
+                        border: "1px solid",
+                        borderColor: (viewReceipt.package_details && viewReceipt.package_details.length > 0 && viewReceipt.package_details.every((p) => p.bin_allocated)) ? "success.light" : "divider",
+                        height: "100%",
+                        display: "flex",
+                        flexDirection: "column",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <Box>
+                        <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.5 }}>
+                          <Typography variant="caption" sx={{ fontWeight: 700, color: "primary.dark" }}>
+                            STEP 4: BIN LOCATION ALLOCATION
+                          </Typography>
+                          {(viewReceipt.package_details && viewReceipt.package_details.length > 0 && viewReceipt.package_details.every((p) => p.bin_allocated)) ? (
+                            <Chip size="small" color="success" label="All Bins Allocated" sx={{ height: 20, fontSize: "0.65rem", fontWeight: 700 }} />
+                          ) : (
+                            <Chip size="small" color="warning" variant="outlined" label="Bins Pending" sx={{ height: 20, fontSize: "0.65rem" }} />
+                          )}
+                        </Box>
+                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          Status: {viewReceipt.package_details && viewReceipt.package_details.filter((p) => p.bin_allocated).length} of {viewReceipt.package_details?.length || 0} Allocated
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                          Physical stock putaway in warehouse
+                        </Typography>
+                      </Box>
+
+                      <Button
+                        size="small"
+                        variant="text"
+                        color="primary"
+                        startIcon={<WarehouseIcon fontSize="small" />}
+                        onClick={() => handleOpenBinAllocation(viewReceipt)}
+                        sx={{ textTransform: "none", fontWeight: 600, p: 0, mt: 1, justifyContent: "flex-start" }}
+                      >
+                        Allocate Bins & Close DRC
+                      </Button>
+                    </Paper>
+                  </Grid>
+                </Grid>
+              </Paper>
+
               <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mb: 1.5, alignItems: "center" }}>
-                <DrcStatusChip receipt={viewReceipt} showRemarks={false} />
                 {viewReceipt.inspection_by && (
                   <Chip
                     size="small"
@@ -2504,24 +3091,84 @@ export default function MaterialReceipt() {
               {viewReceipt.package_details && viewReceipt.package_details.length > 0 && (
                 <>
                   <Divider sx={{ my: 1.5 }} />
-                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
-                    Package Details
-                  </Typography>
-                  <TableContainer sx={{ borderRadius: 2 }}>
+                  <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.75 }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                      Materials & Bin Allocations ({viewReceipt.package_details.length} Items)
+                    </Typography>
+                    <Button
+                      size="small"
+                      startIcon={<WarehouseIcon fontSize="small" />}
+                      onClick={() => handleOpenBinAllocation(viewReceipt)}
+                      sx={{ textTransform: "none", fontWeight: 600, fontSize: "0.75rem" }}
+                    >
+                      Update Bins
+                    </Button>
+                  </Box>
+                  <TableContainer component={Paper} elevation={0} sx={{ borderRadius: 2, border: "1px solid", borderColor: "divider" }}>
                     <Table size="small">
-                      <TableHead>
+                      <TableHead sx={{ bgcolor: "grey.100" }}>
                         <TableRow>
-                          <TableCell>Qty</TableCell>
-                          <TableCell>Package Type</TableCell>
-                          <TableCell>Description</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>Material Code</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>Description</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }} align="right">Qty</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>UoM</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>SAP Movements</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>Bin Location</TableCell>
                         </TableRow>
                       </TableHead>
                       <TableBody>
                         {viewReceipt.package_details.map((row, index) => (
-                          <TableRow key={index}>
-                            <TableCell>{row.quantity}</TableCell>
-                            <TableCell>{row.package_type || "-"}</TableCell>
+                          <TableRow key={index} hover>
+                            <TableCell sx={{ fontWeight: 700, fontFamily: "monospace" }}>
+                              {row.material_code || "-"}
+                            </TableCell>
                             <TableCell>{row.description || "-"}</TableCell>
+                            <TableCell align="right" sx={{ fontWeight: 700 }}>{row.quantity}</TableCell>
+                            <TableCell>{row.uom || row.package_type || "NOS"}</TableCell>
+                            <TableCell>
+                              <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
+                                {row.sap_103_doc && (
+                                  <Typography variant="caption" color="text.secondary">
+                                    103: {row.sap_103_doc}
+                                  </Typography>
+                                )}
+                                {(row.sap_105_doc || viewReceipt.grn_number) && (
+                                  <Typography variant="caption" color="success.main" sx={{ fontWeight: 600 }}>
+                                    105: {row.sap_105_doc || viewReceipt.grn_number}
+                                  </Typography>
+                                )}
+                                {!row.sap_103_doc && !row.sap_105_doc && !viewReceipt.grn_number && (
+                                  <Typography variant="caption" color="text.secondary">-</Typography>
+                                )}
+                              </Box>
+                            </TableCell>
+                            <TableCell>
+                              {row.bin_allocated && row.bin_location ? (
+                                <Chip
+                                  size="small"
+                                  color="success"
+                                  icon={<WarehouseIcon fontSize="small" />}
+                                  label={row.bin_location}
+                                  sx={{ fontWeight: 700, height: 24, fontSize: "0.75rem" }}
+                                />
+                              ) : row.bin_location ? (
+                                <Chip
+                                  size="small"
+                                  variant="outlined"
+                                  color="primary"
+                                  label={row.bin_location}
+                                  sx={{ fontWeight: 600, height: 24, fontSize: "0.75rem" }}
+                                />
+                              ) : (
+                                <Chip
+                                  size="small"
+                                  variant="outlined"
+                                  label="Unallocated"
+                                  onClick={() => handleOpenBinAllocation(viewReceipt)}
+                                  sx={{ cursor: "pointer", height: 24, fontSize: "0.75rem" }}
+                                />
+                              )}
+                            </TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
@@ -3170,7 +3817,26 @@ export default function MaterialReceipt() {
               )}
             </DialogContent>
 
-            <DialogActions sx={{ p: 1.5, px: 2 }}>
+            <DialogActions sx={{ p: 1.5, px: 2, display: "flex", gap: 1, flexWrap: "wrap", justifyContent: "space-between" }}>
+              <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                <Button
+                  variant="outlined"
+                  startIcon={<SyncIcon fontSize="small" />}
+                  onClick={() => handleOpenSapLookupForReceipt(viewReceipt)}
+                  sx={{ borderRadius: 2, fontWeight: 600, textTransform: "none" }}
+                >
+                  Fetch SAP MB51
+                </Button>
+                <Button
+                  variant="outlined"
+                  color="primary"
+                  startIcon={<WarehouseIcon fontSize="small" />}
+                  onClick={() => handleOpenBinAllocation(viewReceipt)}
+                  sx={{ borderRadius: 2, fontWeight: 700, textTransform: "none" }}
+                >
+                  Allocate Bins
+                </Button>
+              </Box>
               <Button
                 variant="contained"
                 startIcon={<EditIcon fontSize="small" />}
@@ -3179,10 +3845,9 @@ export default function MaterialReceipt() {
                   setViewReceipt(null);
                   openEditForm(r);
                 }}
-                fullWidth
-                sx={{ minHeight: 44, borderRadius: 2, fontWeight: 700 }}
+                sx={{ minHeight: 40, borderRadius: 2, fontWeight: 700, px: 3 }}
               >
-                Edit
+                Edit DRC
               </Button>
             </DialogActions>
           </>
@@ -3441,6 +4106,42 @@ export default function MaterialReceipt() {
           setBulkStrapDialogOpen(false);
         }}
       />
+
+      {/* DRC SAP MB51 Lookup Modal */}
+      <DrcSapLookupModal
+        open={sapLookupModalOpen}
+        onClose={() => {
+          setSapLookupModalOpen(false);
+          setSapLookupTargetReceipt(null);
+        }}
+        initialPo={sapLookupInitialPo}
+        initialInvoice={sapLookupInitialInv}
+        targetReceipt={sapLookupTargetReceipt}
+        onApplyToForm={handleApplySapItemsToForm}
+        onApplyToReceipt={handleApplySapItemsToReceipt}
+      />
+
+      {/* Direct Bin Location Allocation Modal */}
+      {binAllocationTargetReceipt && (
+        <DrcBinAllocationModal
+          open={binAllocationModalOpen}
+          onClose={() => {
+            setBinAllocationModalOpen(false);
+            setBinAllocationTargetReceipt(null);
+          }}
+          receipt={binAllocationTargetReceipt}
+          onSuccess={(updatedReceipt) => {
+            if (viewReceipt && viewReceipt.id === updatedReceipt.id) {
+              setViewReceipt(updatedReceipt);
+            }
+            refreshAll();
+            showSnackbar(
+              `Bin locations allocated & stock updated for ${updatedReceipt.drc_number}.`,
+              "success"
+            );
+          }}
+        />
+      )}
 
       <Snackbar
         open={snackbar.open}

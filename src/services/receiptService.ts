@@ -57,6 +57,20 @@ export interface PackageDetailRow {
   quantity: string;
   package_type: string;
   description: string;
+  // SAP Mapped fields:
+  material_code?: string;
+  uom?: string;
+  item_no?: string;
+  sap_103_doc?: string;
+  sap_103_date?: string;
+  sap_105_doc?: string;
+  sap_105_date?: string;
+  storage_location?: string;
+  bin_location?: string;
+  bin_allocated?: boolean;
+  allocated_qty?: number;
+  allocated_at?: string;
+  allocated_by?: string;
 }
 
 export type DocumentType =
@@ -145,6 +159,12 @@ export interface ReceiptHeader {
   upload_date: string | null;
   closed_date: string | null;
   closed_by: string | null;
+  // SAP MB51 Sync and 103/105 tracking
+  sap_103_doc?: string | null;
+  sap_103_date?: string | null;
+  sap_105_doc?: string | null;
+  sap_105_date?: string | null;
+  sap_items?: PackageDetailRow[] | null;
 }
 
 /**
@@ -218,11 +238,30 @@ function toNullableNumber(value: string): number | null {
 function cleanPackageDetails(rows: PackageDetailRow[]): PackageDetailRow[] {
   return rows
     .map((row) => ({
-      quantity: row.quantity.trim(),
-      package_type: row.package_type.trim(),
-      description: row.description.trim(),
+      quantity: (row.quantity || "").trim(),
+      package_type: (row.package_type || "").trim(),
+      description: (row.description || "").trim(),
+      ...(row.material_code ? { material_code: row.material_code.trim() } : {}),
+      ...(row.uom ? { uom: row.uom.trim() } : {}),
+      ...(row.item_no ? { item_no: row.item_no.trim() } : {}),
+      ...(row.sap_103_doc ? { sap_103_doc: row.sap_103_doc.trim() } : {}),
+      ...(row.sap_103_date ? { sap_103_date: row.sap_103_date } : {}),
+      ...(row.sap_105_doc ? { sap_105_doc: row.sap_105_doc.trim() } : {}),
+      ...(row.sap_105_date ? { sap_105_date: row.sap_105_date } : {}),
+      ...(row.storage_location ? { storage_location: row.storage_location.trim() } : {}),
+      ...(row.bin_location ? { bin_location: row.bin_location.trim() } : {}),
+      ...(row.bin_allocated !== undefined ? { bin_allocated: row.bin_allocated } : {}),
+      ...(row.allocated_qty !== undefined ? { allocated_qty: row.allocated_qty } : {}),
+      ...(row.allocated_at ? { allocated_at: row.allocated_at } : {}),
+      ...(row.allocated_by ? { allocated_by: row.allocated_by } : {}),
     }))
-    .filter((row) => row.quantity || row.package_type || row.description);
+    .filter(
+      (row) =>
+        row.quantity ||
+        row.package_type ||
+        row.description ||
+        row.material_code
+    );
 }
 
 /** Best-effort numeric total for the legacy package_count column - rows with
@@ -654,8 +693,8 @@ export async function createReceipt(
 export async function updateReceipt(
   id: number,
   input: ReceiptFormInput,
-  newPhotoFiles: File[],
-  keptPhotoUrls: string[],
+  newPhotoFiles: File[] = [],
+  keptPhotoUrls: string[] = [],
   newDocumentUploads: DocumentUpload[] = [],
   keptAttachments: AttachmentFile[] = []
 ): Promise<ReceiptHeader> {
