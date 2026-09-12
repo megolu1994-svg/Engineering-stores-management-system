@@ -97,6 +97,9 @@ export const DrcSapLookupModal: React.FC<DrcSapLookupModalProps> = ({
     }
   }, [open, initialPo, initialInvoice, targetReceipt]);
 
+  const getItemKey = (item: SapMatchedLineItem) =>
+    `${item.material_code}__${item.item_no}__${item.sap_103_doc || item.sap_105_doc || item.invoice_number || ""}`;
+
   async function performSearch(po: string, inv: string) {
     if (!po.trim() && !inv.trim()) {
       setErrorMessage("Please enter a PO Number or Invoice Number to search.");
@@ -112,7 +115,7 @@ export const DrcSapLookupModal: React.FC<DrcSapLookupModalProps> = ({
       // Pre-select all items by default
       const initialSelection: Record<string, boolean> = {};
       res.items.forEach((item) => {
-        initialSelection[`${item.material_code}__${item.item_no}`] = true;
+        initialSelection[getItemKey(item)] = true;
       });
       setSelectedItems(initialSelection);
     } catch (err) {
@@ -127,7 +130,7 @@ export const DrcSapLookupModal: React.FC<DrcSapLookupModalProps> = ({
     if (!result) return;
     const nextSelection: Record<string, boolean> = {};
     result.items.forEach((item) => {
-      nextSelection[`${item.material_code}__${item.item_no}`] = checked;
+      nextSelection[getItemKey(item)] = checked;
     });
     setSelectedItems(nextSelection);
   };
@@ -147,7 +150,7 @@ export const DrcSapLookupModal: React.FC<DrcSapLookupModalProps> = ({
     if (!result) return;
 
     const chosenItems = result.items.filter(
-      (item) => selectedItems[`${item.material_code}__${item.item_no}`]
+      (item) => selectedItems[getItemKey(item)]
     );
 
     if (chosenItems.length === 0) {
@@ -312,6 +315,14 @@ export const DrcSapLookupModal: React.FC<DrcSapLookupModalProps> = ({
                       )}
                     </Box>
                     <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                      {result.invoiceMatched && result.invoiceNumber && (
+                        <Chip
+                          size="small"
+                          color="primary"
+                          label={`Invoice: ${result.invoiceNumber}`}
+                          sx={{ fontWeight: 600 }}
+                        />
+                      )}
                       {result.has103 && (
                         <Chip
                           size="small"
@@ -339,6 +350,13 @@ export const DrcSapLookupModal: React.FC<DrcSapLookupModalProps> = ({
                       )}
                     </Box>
                   </Box>
+
+                  {result.searchedInvoice && !result.invoiceMatched && (
+                    <Alert severity="warning" sx={{ mb: 1, py: 0.5, fontSize: "0.8rem" }}>
+                      No movements matched Invoice &quot;{result.searchedInvoice}&quot; under PO {result.poNumber}.
+                      Showing individual consignments/deliveries on this PO below:
+                    </Alert>
+                  )}
 
                   <Typography variant="caption" color="text.secondary">
                     {result.items.length} line item(s) found across {result.rawMovementCount} raw movement document(s).
@@ -368,7 +386,8 @@ export const DrcSapLookupModal: React.FC<DrcSapLookupModalProps> = ({
                         <TableCell sx={{ fontWeight: 700 }}>Item #</TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>Material Code</TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>Description</TableCell>
-                        <TableCell sx={{ fontWeight: 700 }}>SAP Ref</TableCell>
+                        <TableCell sx={{ fontWeight: 700 }}>Invoice / Ref</TableCell>
+                        <TableCell sx={{ fontWeight: 700 }}>SAP Doc</TableCell>
                         <TableCell sx={{ fontWeight: 700 }} align="right">Qty</TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>UoM</TableCell>
                         <TableCell sx={{ fontWeight: 700 }}>SAP Movement Status</TableCell>
@@ -376,7 +395,7 @@ export const DrcSapLookupModal: React.FC<DrcSapLookupModalProps> = ({
                     </TableHead>
                     <TableBody>
                       {result.items.map((item) => {
-                        const key = `${item.material_code}__${item.item_no}`;
+                        const key = getItemKey(item);
                         const isSelected = !!selectedItems[key];
                         return (
                           <TableRow
@@ -394,12 +413,22 @@ export const DrcSapLookupModal: React.FC<DrcSapLookupModalProps> = ({
                             </TableCell>
                             <TableCell>{item.material_description || "-"}</TableCell>
                             <TableCell>
-                              <Typography variant="caption" sx={{ fontFamily: "monospace", display: "block" }}>
-                                {item.sap_103_doc ? `103: ${item.sap_103_doc}` : item.sap_105_doc ? `105: ${item.sap_105_doc}` : "-"}
+                              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                {item.invoice_number || "-"}
                               </Typography>
                               {item.purchase_order && (
                                 <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
                                   PO: {item.purchase_order}
+                                </Typography>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <Typography variant="caption" sx={{ fontFamily: "monospace", display: "block" }}>
+                                {item.sap_103_doc ? `103: ${item.sap_103_doc}` : item.sap_105_doc ? `105: ${item.sap_105_doc}` : "-"}
+                              </Typography>
+                              {item.sap_103_date && (
+                                <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                                  {item.sap_103_date}
                                 </Typography>
                               )}
                             </TableCell>

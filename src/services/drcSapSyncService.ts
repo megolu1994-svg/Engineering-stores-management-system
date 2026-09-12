@@ -26,6 +26,8 @@ export interface DrcSapLookupResult {
   has105: boolean;
   poNumber: string | null;
   invoiceNumber: string | null;
+  searchedInvoice?: string | null;
+  invoiceMatched?: boolean;
   vendorName: string | null;
   doc103List: string[];
   doc105List: string[];
@@ -90,6 +92,47 @@ function normalizeDocCode(value: string | null | undefined): string {
   return trimmed;
 }
 
+function cleanAlphaNum(val: string | null | undefined): string {
+  if (!val) return "";
+  return String(val).replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+}
+
+function isInvoiceMatch(
+  targetInvoice: string,
+  rowInvoice: string | null | undefined,
+  rowDocText: string | null | undefined
+): boolean {
+  if (!targetInvoice) return false;
+  const tClean = targetInvoice.trim().toLowerCase();
+  const tAlpha = cleanAlphaNum(targetInvoice);
+  const tNorm = normalizeDocCode(targetInvoice).toLowerCase();
+
+  const rInv = String(rowInvoice || "").trim().toLowerCase();
+  const rAlpha = cleanAlphaNum(rowInvoice);
+  const rNorm = normalizeDocCode(rowInvoice).toLowerCase();
+  const rText = String(rowDocText || "").trim().toLowerCase();
+  const rTextAlpha = cleanAlphaNum(rowDocText);
+
+  // Exact match
+  if (rInv && (rInv === tClean || rNorm === tNorm)) return true;
+
+  // Alphanumeric canonical match (handles "H-16189" vs "H16189" vs "H 16189" vs "H/16189")
+  if (tAlpha && rAlpha && tAlpha === rAlpha) return true;
+
+  // Substring matching when at least 4 alphanumeric characters (e.g. "16189" in "H-16189")
+  if (tAlpha.length >= 4 && rAlpha.length >= 4) {
+    if (rAlpha.includes(tAlpha) || tAlpha.includes(rAlpha)) return true;
+  }
+
+  // Check document header text
+  if (rText && (rText === tClean || rText.includes(tClean))) return true;
+  if (tAlpha.length >= 4 && (rTextAlpha === tAlpha || rTextAlpha.includes(tAlpha))) return true;
+
+  return false;
+}
+
+const roundQty = (val: number) => Math.round((val + Number.EPSILON) * 1000) / 1000;
+
 /**
  * Queries `sap_material_documents` (MB51 history) by PO Number and/or Invoice Number.
  * Matches 103 (GR into blocked stock) and 105 (GR release from blocked stock) records.
@@ -107,6 +150,8 @@ export async function findSapDocumentsForDrc(
     has105: false,
     poNumber: cleanPo || null,
     invoiceNumber: cleanInv || null,
+    searchedInvoice: cleanInv || null,
+    invoiceMatched: false,
     vendorName: null,
     doc103List: [],
     doc105List: [],
@@ -134,8 +179,8 @@ export async function findSapDocumentsForDrc(
     const validReceiptMovements = new Set(["103", "104", "105", "106", "101", "102"]);
 
     // Build targeted query conditions
-    // CRITICAL FIX: If PO is provided, query by PO ONLY so we NEVER pull in
-    // unrelated POs that coincidentally share a simple invoice number like "0357".
+    // CRITICAL: If PO is provided, query by PO ONLY so we NEVER pull in
+    // unrelated POs that coincidentally share a simple invoice number.
     if (cleanPo) {
       const poFilters = [`purchase_order.eq.${cleanPo}`];
       if (poNorm && poNorm !== cleanPo) {
@@ -147,7 +192,11 @@ export async function findSapDocumentsForDrc(
       query = query.or(poFilters.join(","));
     } else if (cleanInv) {
       // Only when PO is not provided, query by invoice
-      const invFilters = [`invoice_number.eq.${cleanInv}`];
+      const invFilters = [
+        `invoice_number.eq.${cleanInv}`,
+        `invoice_number.ilike.%${cleanInv}%`,
+        `document_header_text.ilike.%${cleanInv}%`,
+      ];
       if (invNorm && invNorm !== cleanInv) {
         invFilters.push(`invoice_number.eq.${invNorm}`);
       }
@@ -172,42 +221,30 @@ export async function findSapDocumentsForDrc(
       return emptyResult;
     }
 
-    // If both PO and Invoice were provided, narrow down within the PO's records
-    if (cleanPo && cleanInv && rows.length > 0) {
-      const invLower = cleanInv.toLowerCase();
-      const invNormLower = invNorm.toLowerCase();
+    // Check if an invoice was searched and matches within the records
+    let invoiceMatched = false;
+    if (cleanInv && rows.length > 0) {
+      const matchingInvRows = rows.filter((r) =>
+        isInvoiceMatch(cleanInv, r.invoice_number, r.document_header_text)
+      );
 
-      const matchingInvRows = rows.filter((r) => {
-        const rowInv = String(r.invoice_number || "").trim().toLowerCase();
-        const rowDocText = String(r.document_header_text || "").trim().toLowerCase();
-        const rowInvNorm = normalizeDocCode(r.invoice_number).toLowerCase();
-        return (
-          rowInv === invLower ||
-          rowInv === invNormLower ||
-          rowInvNorm === invNormLower ||
-          rowDocText.includes(invLower) ||
-          (invNormLower.length >= 3 && rowInv.includes(invNormLower))
-        );
-      });
-
-      // Only narrow down if matching invoice rows actually exist under this PO
       if (matchingInvRows.length > 0) {
         rows = matchingInvRows;
+        invoiceMatched = true;
       }
     }
 
     // Categorize documents and movements
-    // 103: GR into blocked stock
-    // 104: Reversal of 103
-    // 105: Release from blocked stock into unrestricted (GRN)
-    // 106: Reversal of 105
     const doc103Set = new Set<string>();
     const doc105Set = new Set<string>();
     let latest103Date: string | null = null;
     let latest105Date: string | null = null;
     let foundVendor: string | null = null;
 
-    // Group items by material_code and item number
+    // Group items. If a specific invoice was matched, group by material and PO item.
+    // If multiple deliveries exist under a blanket PO (and no single invoice was matched),
+    // group by delivery (invoice / 103 document) so different truck shipments don't get
+    // summed into an inflated aggregate quantity.
     const itemMap = new Map<
       string,
       {
@@ -258,7 +295,17 @@ export async function findSapDocumentsForDrc(
         }
       }
 
-      const key = `${matCode}__${itemNo}`;
+      // If an invoice is matched, all rows belong to this single delivery -> group by item.
+      // If no invoice is matched but multiple deliveries exist on this PO, group by invoice or doc
+      // so distinct deliveries are kept separate.
+      let key = `${matCode}__${itemNo}`;
+      if (!invoiceMatched && rows.length > 2) {
+        const deliveryTag = cleanAlphaNum(inv) || (mvt === "103" ? `doc_${doc}` : "");
+        if (deliveryTag) {
+          key = `${matCode}__${itemNo}__${deliveryTag}`;
+        }
+      }
+
       let item = itemMap.get(key);
       if (!item) {
         item = {
@@ -283,6 +330,9 @@ export async function findSapDocumentsForDrc(
       if (desc && !item.material_description) {
         item.material_description = desc;
       }
+      if (inv && !item.invoice_number) {
+        item.invoice_number = inv;
+      }
 
       if (mvt === "103") {
         item.qty103 += qty;
@@ -303,11 +353,10 @@ export async function findSapDocumentsForDrc(
 
     const items: SapMatchedLineItem[] = [];
     for (const item of itemMap.values()) {
-      const q103 = Math.max(0, item.qty103);
-      const q105 = Math.max(0, item.qty105);
+      const q103 = roundQty(Math.max(0, item.qty103));
+      const q105 = roundQty(Math.max(0, item.qty105));
 
-      // CRITICAL FIX: Exclude line items with zero received quantity
-      // (prevents cancelled movements or unrelated rows from showing as 0-quantity items)
+      // Exclude line items with zero received quantity
       if (q103 === 0 && q105 === 0) {
         continue;
       }
@@ -347,6 +396,8 @@ export async function findSapDocumentsForDrc(
       has105: doc105List.length > 0,
       poNumber: cleanPo || null,
       invoiceNumber: cleanInv || null,
+      searchedInvoice: cleanInv || null,
+      invoiceMatched,
       vendorName: foundVendor,
       doc103List,
       doc105List,
